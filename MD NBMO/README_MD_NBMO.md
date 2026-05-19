@@ -1,0 +1,13 @@
+# MD NBMO Regulatory Lists
+
+National Bank of Moldova (NBM, BNM) — English public pages for supervised entities. Several lists are published on a single hub page with downloadable registers (typically Excel); list 1 is a dedicated HTML page for authorized banks.
+
+| RegCtry | RegCode | ListNr | ListName | URL | Comments |
+|---------|---------|--------|----------|-----|----------|
+| MD | NBMO | 1 | List of authorized banks of the Republic of Moldova | https://www.bnm.md/en/content/authorized-banks-republic-moldova | HTML list; extraction already implemented in the notebook — keep maintaining it. |
+| MD | NBMO | 2 | List of authorized insurances of the Republic of Moldova | https://www.bnm.md/en/content/supervised-entities-insurance-and-non-bank-lending#art1 | From the supervised entities page: (a) first table of **Register of professional participants in the insurance market**; (b) all entities from **List of insurance and/or reinsurance brokers**; (c) all entities from **Register of insurance and bancassurance agents**. Use only the **first worksheet** of each downloaded file. |
+| MD | NBMO | 3 | List of Non-bank credit organizations of the Republic of Moldova | https://www.bnm.md/en/content/supervised-entities-insurance-and-non-bank-lending#art1 | From **Register of authorized non-bank credit organizations**. Exclude rows highlighted in orange and any row whose company name contains **(Radiată / Excluded / Исключена)**. |
+| MD | NBMO | 4 | List of Savings and Lending Associations of the Republic of Moldova | https://www.bnm.md/en/content/supervised-entities-insurance-and-non-bank-lending#art1 | Extract entities from **List of Savings and Loan Associations that hold a category A license** and **List of Savings and Loan Associations that hold a category B license and of the Central National Association of SLA** (BNM publishes these as **Word** `.doc` / `.docx` files with tables). From the **second** list only, remove rows whose company name contains **filiala** or **sucursala** (case-insensitive). |
+| MD | NBMO | 5 | List of Credit history bureaus of the Republic of Moldova | https://www.bnm.md/en/content/supervised-entities-insurance-and-non-bank-lending#art1 | From the two **.xlsx** files: **List of Credit history bureaus** and **List of entities (information sources) that have contracts…** (first worksheet only). In the second file, exclude entities whose company name contains **radiata** / **radiată** (case-insensitive). |
+
+**Note:** List codes 2–5 share the same hub URL (`#art1`). The scraper must follow the file links on that section of the page, download the relevant registers, and apply the filters above before appending rows to the SQL-ready output.

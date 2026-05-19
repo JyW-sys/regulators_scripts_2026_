@@ -1,0 +1,412 @@
+# %%
+
+#------------------------------------------------ Begin_Librairie ----------------------------------------
+
+import datetime
+
+import pandas as pd
+
+from pandas import ExcelWriter
+
+from selenium import webdriver
+
+import math
+
+import time
+
+from time import sleep
+
+import os
+
+from selenium.webdriver.common.by import By
+
+from bs4 import BeautifulSoup
+
+from selenium.webdriver.common.keys import Keys
+
+from selenium.webdriver.support.ui import Select
+
+from selenium.webdriver.support import expected_conditions
+
+from webdriver_manager.chrome import ChromeDriverManager
+
+# %%
+
+# %%
+
+#------------------------------------------------ Begin_ fileName ----------------------------------------
+
+regulatorName = 'US NFA' ## change to current controller name
+
+
+
+print(f"Running {regulatorName} Web Scraping Tool v.1.3")
+
+now=datetime.datetime.now()
+
+filename = '{} SQL Ready {}.xlsx'.format(regulatorName, str(now).replace(":",".")[:-7])
+
+#scriptfolder = f"C:\\Users\\wuj1\\OneDrive - moodys.com\\Desktop\\Regulator\\{regulatorName}"
+scriptfolder=os.path.dirname(os.path.abspath(__file__)) ## to decomment for the production environment
+
+os.chdir(scriptfolder)
+
+writer = ExcelWriter(filename, engine='openpyxl')
+
+tempfolder=os.path.join(scriptfolder, 'tempfolder') #if files are downloaded during the process
+
+
+
+if os.path.exists(tempfolder):
+
+    for rem in os.listdir(tempfolder):
+
+        os.remove(os.path.join(tempfolder, rem))
+
+else:
+
+    os.mkdir(tempfolder)
+
+
+# %%
+
+#------------------------------------------------ Begin_chromedriver ----------------------------------------
+
+#Starting Chrome driver, set to download files in tempfolder
+
+chromeOptions = webdriver.ChromeOptions()
+
+prefs = {"plugins.always_open_pdf_externally": True,
+
+		 "download.prompt_for_download": False,
+
+		 "download.default_directory" : tempfolder}
+
+chromeOptions.add_experimental_option("prefs",prefs)
+
+driver = webdriver.Chrome(options=chromeOptions)
+
+driver.maximize_window()
+
+
+
+
+# %%
+
+#------------------------------------------------ Begin_Variable ----------------------------------------
+
+regdict={
+
+        'US NFA 1': 'https://www.nfa.futures.org/basicnet',
+
+        }
+
+
+
+Typology={
+
+        'US NFA 1': 'NFA Members Approved',
+
+
+        }
+
+
+
+sqldict={'bvdid': [], 'priority': [], 'ListLabel': [], 'Typology': [], 'EntryType': [], 'Name': [], 'InternalID_1': [], 'InternalID_1_type': [], 'InternalID_2': [], 
+
+          'InternalID_2_type': [], 'InternalID_3': [], 'InternalID_3_type': [], 'CoType': [], 'License_Type': [], 'Address_1': [], 'Address_2': [], 'City': [], 
+
+          'Zip': [], 'Cntry': [], 'Phone': [], 'Fax': [], 'Website': [], 'Email': [], 'RegulationType': [], 'RegulationTypeCode': [], 'RegulationDate': [], 'CancellationDate': [], 
+
+          'RegCtry': [], 'RegCode' : [], 'ListCode': [], 'ListLanguage': [], 'ListValidityDate': [], 'ListName': [], 'ListProcessDate': [],
+        }
+
+
+now = datetime.datetime.now()
+
+processdate = now.strftime('%Y-%m-%d')
+
+alphabet_list = [chr(i) for i in range(65, 91)]
+digit_list = [str(i) for i in range(10)]
+char_list = alphabet_list + digit_list
+
+print(char_list)
+
+
+
+# %%
+# %%
+
+#------------------------------------------------ Begin_Fouction ----------------------------------------
+
+def bourange_same_length_array(sqldict) :
+
+    maxlen = len(sqldict['ListProcessDate'])
+
+    for key, val in sqldict.items():
+
+        if len(sqldict[key]) != maxlen:
+
+            empty = []
+
+            total_empty = maxlen - len(sqldict[key])
+
+            for i in range(total_empty):
+
+                empty.append('')
+
+            sqldict[key]=sqldict[key]+empty
+
+    return sqldict
+
+
+
+# Define a function to scroll to the bottom of the page
+
+def scroll_to_bottom(driver):
+
+    # Get scroll height
+
+    last_height = driver.execute_script("return document.body.scrollHeight")
+
+
+
+    while True:
+
+        # Scroll down to the bottom
+
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        # Wait to load the page
+
+        sleep(3)
+        # Calculate new scroll height and compare with last scroll height
+
+        new_height = driver.execute_script("return document.body.scrollHeight")
+
+        if new_height == last_height:
+
+            break
+
+        last_height = new_height
+
+def click_element_by_xpath(driver, xpath):
+
+    # Find the element and click
+
+    element = driver.find_element(By.XPATH, xpath)
+
+    element.click()
+    
+
+def click_on_cookies(web_driver):
+
+    try:
+
+        web_driver.find_element(By.XPATH,f'//*[@id="modal-content-id-1"]/footer/div/button[3]').click()
+        print('[Success] : Success to Click Cookie')
+
+    except Exception as err:
+
+        print('[ERROR] : Failed to click "I Accept" button on the cookies banner:', err)
+        
+
+def scrollinAndClick(xpath,key_press=False):
+    if len(xpath) != 0 :
+        for times in range(60):
+            try:
+                driver.find_element(By.XPATH, xpath).click()
+                sleep(1)
+                break
+            except:
+                print(f"[ERROR] : trying {times+1}/10 to key press 'DOWN' (scrolling)")
+                sleep(1)
+                if key_press:                    
+                    driver.find_element(By.TAG_NAME, 'body').send_keys(key_press)
+        else:   
+            raise Exception(f'[ERROR] : Failed scrollin Or Click on xpath element : {xpath}')
+
+def check_dowload_files(tempfolder, fileType, wait_time=10):
+
+    for time in range(wait_time):
+
+        if len([ele for ele in os.listdir(tempfolder) if '.crdownload' not in ele and '.tmp' not in ele]) != 0 :
+
+            print(f"[INFO] : - {fileType} file = {os.listdir(tempfolder)[0]}")
+
+            break
+
+        else:
+
+            print(f"[INFO] : - Download {fileType} file ... (wait {time*2}/{wait_time*2} s)")
+
+            sleep(2)
+
+    else:
+
+        raise Exception(f'[ERROR] : - Failed to Download {fileType} file. Run Script again' )
+
+
+# %%
+
+#------------------------------------------------ Begin_Main ----------------------------------------
+
+for k, reg in enumerate(regdict):
+    
+
+    print(f"[INFO] : Working {k+1}/{len(regdict)} _({reg})_ ")
+
+    #driver.get(regdict[reg])
+    
+    # driver.maximize_window()
+    
+    # sleep(3)
+    
+    
+    for first_char in char_list:
+        
+        driver.get(regdict[reg])
+        driver.maximize_window()
+        sleep(3)
+        input_element = driver.find_element(By.XPATH, '//*[@id="firm"]/div/input')
+        input_element.send_keys(first_char)
+        
+        input_element.send_keys(Keys.RETURN)
+        sleep(30)
+        
+    # The website update speed is toooooooooooooooo slow
+        
+        
+        soup=BeautifulSoup(driver.page_source, 'html.parser')
+        sleep(30)
+        # Check page loading status and get the sleep time
+
+    
+        #sleep(check_page_loading(driver)+3)
+    
+        contents = soup.find('section',class_='section interior')
+        sleep(10)
+        tables = contents.find('div',class_='container')
+    
+        click_element_by_xpath(driver,'//*[@id="table_firm_results"]/thead/tr/th[2]/span/div')
+        
+        sleep(3)
+        
+        checkboxes = driver.find_element(By.XPATH, '//*[@id="filter_mem_status_firms"]')
+        
+        isOver = False
+        sleep(3)
+        for index, checkbox in enumerate(checkboxes.find_elements(By.TAG_NAME, 'li')):
+            sleep(3)
+            if 'NFA Member Approved' in checkbox.text:
+                print(f'[INFO] -- {index},{checkbox.text}')
+                checkbox = checkbox.find_element(By.TAG_NAME, 'input')
+                checkbox.click()
+                print('[INFO] -- Filter NFA Member Approved')
+                #driver.execute_script("arguments.click();", checkbox)
+                sleep(3)
+
+                print(f"[INFO] -- Check isOver is {isOver}")
+                while not isOver:
+                    sleep(30)
+                    soup = BeautifulSoup(driver.page_source, 'html.parser')
+                    sleep(3)
+                    print(f'[INFO] -- Get data, Current Page {soup.find(id="current_page_header").text}')
+                    
+                    for tr in soup.find('table').find('tbody').find_all('tr'):
+                        tds = tr.find_all('td')
+                        # for td in tds:
+                        #     # print(td.text)
+                        #     # Company Name
+                        name = tds[0].find('h4').text
+                            # NFA ID & Internalid type NFA ID
+                        nfaId = tds[0].find('small').text.split(':')[-1].split('|')[0]
+                            # City
+                        
+                            
+                        try:
+                            # State
+                            city = tds[0].find('small').text.split('|')[-1].split(',')[0]
+                            state = tds[0].find('small').text.split('|')[-1].split(',')[1]
+                            
+                            
+                        except:
+                            try:
+                                city = tds[0].find('small').text.split(':')[-1].split('|')[1]
+                            except:
+                                city = ''
+                            state =  ''
+                        
+                        listName = tds[1].text
+                        typology = tds[2].text
+                        if listName == 'NFA Member Approved':
+                            sqldict['Name'].append(name)
+                            
+
+                            sqldict['InternalID_1_type'].append('NFA ID')
+                            sqldict['InternalID_1'].append(nfaId)
+                            sqldict['RegulationType'].append('Authorised')
+                            sqldict['City'].append(city)
+                            sqldict['State'].append(state)
+                            sqldict['ListProcessDate'].append(processdate)
+                            sqldict['RegCtry'].append('US')
+                            sqldict['RegCode'].append('NFA')
+                            sqldict['ListCode'].append(reg.split(' ')[-1])
+                            sqldict['ListName'].append(listName)
+                            sqldict['Typology'].append(typology)
+                    button = driver.find_element(By.XPATH, '//*[@id="pager_header_next"]')
+                    if button.is_enabled():
+                        print('[INFO] -- Button is enabled')
+                        break
+                                                                               
+                    try:
+                        sleep(10)
+                        click_element_by_xpath(driver,'//*[@id="pager_header_next"]')
+                        print('[INFO] -- Next Page')
+                    except:
+                        sleep(20)
+                        click_element_by_xpath(driver,'//*[@id="pager_header_next"]')
+                        print('[INFO] -- Next Page')
+                        
+
+                    
+                    sleep(30)
+                    soup=BeautifulSoup(driver.page_source, 'html.parser')
+                    sleep(3)
+                    # no_result = soup.find('div',id ='basic_search_no_results' ).find('h3')
+                    
+                    style = soup.find('div',id='basic_search_no_results').get('style')
+                    print('[INFO] -- Check Avalible Content')
+                    if 'display:none;' in style:
+                        print('[INFO] -- Avalible Content')
+                        sleep(3)
+                    else:
+                        print('[INFO] -- No Avalible Content')
+                        isOver= True
+                break
+            else:
+                print('[INFO] -- Not an NFA Member')
+        continue
+    
+sqldict = bourange_same_length_array(sqldict)
+    
+        
+   
+# %%
+
+#------------------------------------------------ Begin_writer and save df to excel  ----------------------------------------
+
+
+os.chdir(scriptfolder)
+
+df=pd.DataFrame(sqldict)
+
+df.to_excel(writer, 'SQL Ready', index=False)
+
+writer.save()
+
+writer.close()
+
+driver.quit()
+
+sleep(3)
+     

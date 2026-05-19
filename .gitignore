@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.Python
+*.egg-info/
+build/
+dist/
+
+# Bundled tools (install separately - see README)
+Tesseract-OCR/
+poppler-*/
+RektCAPTCHA-main/
+edgedriver_win64/
+tessdata/
+
+# Selenium / browser automation profiles
+**/chrome_profile/
+**/chromedriver*
+**/geckodriver*
+**/msedgedriver*
+
+# Scraped data outputs
+**/tempfolder/
+*.csv
+*.xlsx
+*.xls
+*.pdf
+*.doc
+*.docx
+
+# Source folders explicitly excluded from upload
+Template/
+New_Method_TEST/
+regulators_scripts_2025_end_/
+scripts/
+qa_positive_combined/
+doc/
+copilot/
+Driver_Notes/
+.github/
+
+# Secrets - never commit
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.crt
+credentials*.json
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.cursor/
+.idea/
+
+# Logs / DBs
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Binaries
+*.exe
+*.dll

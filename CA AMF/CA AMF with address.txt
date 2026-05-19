@@ -1,0 +1,414 @@
+# %%
+
+#------------------------------------------------ Begin_Librairie ----------------------------------------
+
+import pandas as pd
+
+from bs4 import BeautifulSoup
+
+from time import sleep
+
+from datetime import datetime
+
+from pandas import ExcelWriter
+
+from selenium import webdriver
+
+from selenium.webdriver.common.by import By
+
+import datetime
+
+import os
+
+from selenium.webdriver.chrome.service import Service as ChromeService
+
+
+
+# %%
+
+# %%
+
+#------------------------------------------------ Begin_ fileName ----------------------------------------
+regulatorName = 'CA AMF'
+
+print(f"Running{regulatorName} Web Scraping Tool v.1.0")
+
+
+now=datetime.datetime.now()
+
+filename= 'CA AMF Data {}.xlsx'.format(str(now).replace(":",".")[:-7])
+
+#scriptfolder = f"C:\\Users\\wuj1\\OneDrive - moodys.com\\Desktop\\Regulator\\{regulatorName}" ## to comment for the local environment
+
+scriptfolder=os.path.dirname(os.path.abspath(__file__)) ## to decomment for the production environment
+
+os.chdir(scriptfolder)
+
+writer = ExcelWriter(filename)
+
+tempfolder=os.path.join(scriptfolder, 'tempfolder') 
+
+
+
+if os.path.exists(tempfolder):
+
+    for rem in os.listdir(tempfolder):
+
+        os.remove(os.path.join(tempfolder, rem))
+
+else:
+
+    os.mkdir(tempfolder)
+
+# %%
+
+#------------------------------------------------ Begin_chromedriver ----------------------------------------
+
+#Starting Chrome driver, set to download files in tempfolder
+
+chromeOptions = webdriver.ChromeOptions()
+
+prefs = {"plugins.always_open_pdf_externally": True,
+
+		 "download.prompt_for_download": False,
+
+		 "download.default_directory" : tempfolder}
+
+chromeOptions.add_experimental_option("prefs",prefs)
+
+driver = webdriver.Chrome(options=chromeOptions)
+
+driver.maximize_window()
+
+
+
+# %%
+# %%
+
+#------------------------------------------------ Begin_Fouction ----------------------------------------
+
+def bourange_same_length_array(sqldict) :
+
+    maxlen = len(sqldict['ListProcessDate'])
+
+    for key, val in sqldict.items():
+
+        if len(sqldict[key]) != maxlen:
+
+            empty = []
+
+            total_empty = maxlen - len(sqldict[key])
+
+            for i in range(total_empty):
+
+                empty.append('')
+
+            sqldict[key]=sqldict[key]+empty
+
+    return sqldict
+
+
+
+def click_on_cookies(web_driver):
+
+    try:
+
+        web_driver.find_element(By.XPATH,f'//*[@id="ccc-notify-accept"]/span[contains(text(),"Accept")]').click()
+
+    except Exception as err:
+
+        print('[ERROR] : Failed to click "I Accept" button on the cookies banner:', err)
+        
+
+# Define a function to scroll to the bottom of the page
+
+def scroll_to_bottom(driver):
+
+    # Get scroll height
+
+    last_height = driver.execute_script("return document.body.scrollHeight")
+
+
+
+    while True:
+
+        # Scroll down to the bottom
+
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        # Wait to load the page
+
+        sleep(1)
+        # Calculate new scroll height and compare with last scroll height
+
+        new_height = driver.execute_script("return document.body.scrollHeight")
+
+        if new_height == last_height:
+
+            break
+
+        last_height = new_height
+
+def click_element_by_xpath(driver, xpath):
+
+    # Find the element and click
+
+    element = driver.find_element(By.XPATH, xpath)
+
+    element.click()
+
+
+# %%
+
+#------------------------------------------------ Begin_Variable ----------------------------------------
+
+# Find the inner web link into Browser-devTools-Network, because use the link will not show cookie, avoid one click
+
+
+regdict={
+
+        'CA AMF 1': 'https://registres-public.lautorite.qc.ca/1A/Regs.RegistreWeb.Web/en/InstitutionsFinancieres',
+
+        'CA AMF 2': 'https://registres-public.lautorite.qc.ca/1A/Regs.RegistreWeb.Web/en/InstitutionsFinancieres',
+        
+        'CA AMF 3': 'https://registres-public.lautorite.qc.ca/1A/Regs.RegistreWeb.Web/en/InstitutionsFinancieres',
+        
+        'CA AMF 4': 'https://registres-public.lautorite.qc.ca/1A/Regs.RegistreWeb.Web/en/InstitutionsFinancieres',
+        
+        }
+
+
+
+Typology={'CA AMF 1': 'Deposit institutions',
+
+        'CA AMF 2': 'List of trust companies',
+        
+        'CA AMF 3': 'List of savings companies',
+        
+        'CA AMF 4': 'List of insurers'}
+
+
+
+sqldict = {'bvdid': [], 'priority': [], 'ListLabel': [], 'Typology': [], 'EntryType': [], 'Name': [], 'InternalID_1': [], 'InternalID_1_type': [], 'InternalID_2': [], 
+
+         'InternalID_2_type': [], 'InternalID_3': [], 'InternalID_3_type': [], 'CoType': [], 'License_Type': [], 'Address_1': [], 'Address_2': [], 'City': [], 
+
+         'Zip': [], 'Cntry': [], 'Phone': [], 'Fax': [], 'Website': [], 'Email': [], 'RegulationType': [], 'RegulationTypeCode': [], 'RegulationDate': [], 'CancellationDate': [], 
+
+         'RegCtry': [], 'RegCode' : [], 'ListCode': [], 'ListLanguage': [], 'ListValidityDate': [], 'ListName': [], 'ListProcessDate': [], 'LEI Code': [], 'BIC SWIFT Code': [], 'Name - Mother Company': [],
+
+         'Address_1 - Mother company': [], 'Address_2 -  Mother company': [], 'City - Mother company': [], 'Zip - Mother company': [], 'Cntry - Mother company': [], 
+
+         'Phone - Mother company': [], 'Check': []}
+
+
+
+processdate = now.strftime('%Y-%m-%d')
+
+# %%
+
+#------------------------------------------------ Begin_Main ----------------------------------------
+
+
+for k, reg in enumerate(regdict):
+
+    print(f"[INFO] : Working {k+1}/{len(regdict)} _({reg})_ ")
+    
+    clinks=[]
+    
+    driver.get(regdict[reg])
+
+    sleep(4)
+
+    soup=BeautifulSoup(driver.page_source, 'html.parser')
+    click_element_by_xpath(driver,'//*[@id="ui-id-3"]/span[2]/a[1]')
+    sleep(2)
+    if reg =='CA AMF 1':
+        # 1	Deposit institutions
+        click_element_by_xpath(driver,'//*[@id="TypesInstitutionSelectionnees_Depot"]')
+        sleep(1)
+        # click_element_by_xpath(driver, '//*[@id="TypeInstitution"]/option[2]')
+        # sleep(1)
+        click_element_by_xpath(driver, '//*[@id="btnRecherche"]')
+        sleep(2)
+        soup=BeautifulSoup(driver.page_source, 'html.parser')
+    elif reg =='CA AMF 2':
+        # ListCode 2	List of trust companies
+        click_element_by_xpath(driver, '//*[@id="btnRecherche"]')
+        sleep(2)
+        soup=BeautifulSoup(driver.page_source, 'html.parser')
+    elif reg =='CA AMF 3':
+        # ListCode 	List of trust companies
+        click_element_by_xpath(driver,'//*[@id="TypesInstitutionSelectionnees_Depot"]')
+        sleep(1)
+        click_element_by_xpath(driver, '//*[@id="TypeInstitution"]')
+        sleep(1)
+        click_element_by_xpath(driver, '//*[@id="TypeInstitution"]/option[4]')
+        sleep(1)
+        click_element_by_xpath(driver, '//*[@id="btnRecherche"]')
+        sleep(2)
+        soup=BeautifulSoup(driver.page_source, 'html.parser')
+    elif reg =='CA AMF 4':
+        # ListCode 4	List of insurers
+        click_element_by_xpath(driver,'//*[@id="TypesInstitutionSelectionnees_Assureur"]')
+        click_element_by_xpath(driver, '//*[@id="btnRecherche"]')
+        sleep(2)
+        soup=BeautifulSoup(driver.page_source, 'html.parser')
+    
+    soup=soup.find("table", {"id":"searchResultsTable", "class":"table table-striped table-bordered"})
+
+    soup=soup.find("tbody")
+    
+    tds=soup.find_all("td")
+    
+    
+       
+    for index, td in enumerate(tds) :
+
+        if td.find("a") :
+
+            a = td.find("a")
+            
+            type_ = tds[index+1]
+            
+            auth = tds[index+2]
+            
+            # This part code related to Authorized to receive deposits not related to Organization
+            # if auth.find("img"):
+            #     sqldict['RegulationType'].append('Authorized to receive deposits')
+            # else:
+            #     sqldict['RegulationType'].append('')
+            
+            clinks.append('https://registres-public.lautorite.qc.ca/' + a['href'])
+
+            #print(a.text.strip())
+            name = a.text.strip()
+            sqldict['ListProcessDate'].append(processdate)
+            
+            
+            
+            
+        
+    for index, link in enumerate(clinks):
+        driver.get(link)
+        
+        print(index)
+            
+        # if index == 3:
+        #     break
+
+        sleep(0.5)
+
+        soup = BeautifulSoup(driver.page_source,'html.parser')
+        soup = soup.find('div', class_='search-results')
+        infos = soup.find_all('p')
+        sqldict['RegulationType'].append('Authorized')
+        sqldict['InternalID_1_type'].append(infos[0].find('strong').text.strip().replace('\n', '').replace('    ', ' '))
+        sqldict['InternalID_1'].append(infos[0].find('span').text)
+        sqldict['InternalID_2_type'].append(infos[1].find('strong').text.strip().replace('\n', '').replace('    ', ' '))
+        sqldict['InternalID_2'].append(infos[1].find('span').text)
+        institution_name = infos[2].find('span').text
+        sqldict['Name'].append(infos[2].find('span').text)
+        sqldict['ListCode'].append(reg.split(' ')[-1])
+        sqldict['RegCtry'].append('CA')
+        sqldict['RegCode'].append('AMF')
+        if institution_name == 'FÉDÉRATION DES CAISSES DESJARDINS DU QUÉBEC':
+            sqldict['Typology'].append('Credit union federation')
+        elif 'Member caisse of the' in infos[3].find('strong').text:
+            sqldict['Typology'].append('Credit union member')
+        elif 'Non-member caisse of a federation' in infos[3].find('strong').text:
+            sqldict['Typology'].append('Credit union non-member')
+        elif  "Trust company" == infos[4].find('span').text or "Trust company" == infos[3].find('span').text:
+            sqldict['Typology'].append('Trust company')
+            
+        elif infos[4].find('span').text == "Savings company":
+            sqldict['Typology'].append('Savings company')
+        elif "Sector" in infos[4].find('strong').text or soup.find('h2').text=="Insurer's record" :
+            for i in range(len(infos)):
+                for n in infos[i].find_all('span'):
+                    print(n.text)
+                    if n.text == 'Business corporation':
+                        form = 'Insurer - '+ n.text
+                        sqldict['Typology'].append(form)
+                    elif  n.text =='Funeral insurance company':
+                        form = 'Insurer - '+ n.text
+                        sqldict['Typology'].append(form)
+                    elif  n.text =='Mutual benefit association':
+                        form = 'Insurer - '+ n.text
+                        sqldict['Typology'].append(form)
+                    elif  n.text =='Mutual company':
+                        form = 'Insurer - '+ n.text
+                        sqldict['Typology'].append(form)
+                    elif  n.text =='Mutual company member of a federation':
+                        form = 'Insurer - '+ n.text
+                        sqldict['Typology'].append(form)
+                    elif  n.text =='Reciprocal union':
+                        form = 'Insurer - '+ n.text
+                        sqldict['Typology'].append(form)
+                    elif  n.text =='Self-regulatory organization':
+                        form = 'Insurer - '+ n.text
+                        sqldict['Typology'].append(form)
+            
+        addtional_info = soup.find('table').find_all('td')[-1].find('p')
+        spans = addtional_info.find_all('span')
+        
+        add = ''
+        for index, info in enumerate(spans):
+            print(info)
+            if info.text == 'Telephone':
+                print(spans[index+1].text)
+                sqldict['Phone'].append(spans[index+1].text)
+                address = spans[:index]
+                for a in address:
+                    add+=a.text.replace('  ','').replace('\n', ' ')
+
+
+
+        sqldict['Address_1'].append(add)
+
+        
+    print(f'{reg} Total data numbers : {len(clinks)}')
+            
+   
+                
+                
+        
+        
+        
+            
+            
+sqldict = bourange_same_length_array(sqldict)
+
+
+# %%
+
+#------------------------------------------------ Begin_writer and save df to excel  ----------------------------------------
+
+os.chdir(scriptfolder)
+
+df=pd.DataFrame(sqldict)
+
+df.to_excel(writer, 'SQL Ready', index=False)
+
+writer.save()
+
+writer.close()
+
+driver.quit()
+
+sleep(3)
+    
+
+        
+        
+    
+            
+            
+
+            
+            
+    
+    
+
+
+
+

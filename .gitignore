@@ -10,6 +10,11 @@ env/
 build/
 dist/
 
+# Private tooling — don't push
+.claude/
+.mcp.json
+regulators scripts 2025 back up.zip
+
 # Bundled tools (install separately - see README)
 Tesseract-OCR/
 poppler-*/
@@ -69,3 +74,4 @@ desktop.ini
 # Binaries
 *.exe
 *.dll
+

@@ -12,7 +12,7 @@
 
 - **Current Version**: `SV_SSF_v1.py`
 - **Approach**: Static HTML, `requests` + `BeautifulSoup` (no browser/JS needed). `verify=False` for the corporate TLS proxy, desktop User-Agent, `urllib3.disable_warnings`. A small retry wrapper (`get_soup`) handles the occasional proxy timeout.
-- **Language**: Content is Spanish. Entity **Names are kept verbatim in Spanish** (not translated). `ListLanguage='ES'`.
+- **Language**: Site content is Spanish (there is **no English version** of `ssf.gob.sv`), so entity **Names are kept verbatim in Spanish** (not translated). `ListLanguage='EN'` is set to match this batch's convention (SR CBSU / TZ BTAN / SC CBSEY all use `EN`), i.e. the value records the catalogued list language, not the source-text language.
 
 ## Lists
 
@@ -29,8 +29,8 @@
 | 7 | Entidades autorizadas para operar como sociedades de seguros y fianzas | Insurance & surety companies | 2 | accordion | 24 |
 | 8 | Entidades autorizadas para operar como casas de cambio | Exchange houses | 4 | accordion | 1 |
 | 9 | Entidades autorizadas para operar en el mercado de valores | Securities-market entities | 4 | **nested** accordion (category → `h5` names) | 37 |
-| 10 | Entidades autorizadas del sistema previsional | Pension-system entities | 4 | **nested** accordion (category → `li` names) | 6 |
-| | | | | **TOTAL** | **96** |
+| 10 | Entidades autorizadas del sistema previsional | Pension-system entities | 4 | **nested** accordion (category → `li` names) | 5 |
+| | | | | **TOTAL** | **95** |
 
 ## Page structure (WordPress + Elementor)
 
@@ -66,7 +66,7 @@ People/other labels (`Presidente`, `Gerente General`, `Fax`, `Apoderado`, …) a
 | RegCtry / RegCode / ListCode | `SV` / `SSF` / ListNr |
 | ListName | exact Spanish name (see table) |
 | ListLabel | see table |
-| ListLanguage | `ES` |
+| ListLanguage | `EN` (batch convention; names remain verbatim Spanish) |
 | ListProcessDate | run date (`%Y-%m-%d`) |
 
 ## ListLabel decisions
@@ -79,11 +79,11 @@ Per project rule (1=bank, 2=insurance, 3=both, 4=other):
 
 ## Notes / QA
 
-- **96 entities total**, no empty names, no duplicates within a list, no duplicates across lists.
+- **95 entities total**, no empty names, no duplicates within a list, no duplicates across lists.
 - **Field availability varies by page** — SSF publishes an address for almost every entity, a website/phone for many, and an email for almost none (only 1, in list 10). The two name-only categories in list 9 ("Almacenes generales de depósito", "Puestos de bolsa de productos y servicios") list names without contact details, which is why list 9's detail-fill is lower than its row count. This reflects the source, not a parse failure.
 - **City / Zip left blank**: the site embeds the locality inside the free-text address; it is not published as a separate field, so it is kept in `Address_1` rather than guessed.
 - **List 2 merges two pages** (cooperative banks *authorised* and *not authorised* to take deposits); both carry `ListCode=2`, `ListName='Bancos cooperativos'`.
-- **List 10 source duplication**: the pension page renders its two categories twice (two Elementor widgets with slightly different content). The script de-duplicates by Name within each list, yielding the 6 distinct entities (2 AFPs + 4 state pension institutes).
+- **List 10 hidden stale copy (5, not 6)**: the pension page ships its accordion **twice** — a visible copy and a second copy tagged `elementor-hidden-desktop/tablet/mobile` (hidden on every viewport, so no visitor ever sees it). The two copies differ: the visible one lists **Instituto Salvadoreño de Pensiones (ISP)**, while the hidden one still lists the now-defunct **Instituto Nacional de Pensiones de los Empleados Públicos (INPEP)** — the legacy institute that the 2023 pension reform folded into the ISP. An earlier version merged both copies and returned 6; the script now skips `elementor-hidden-*` items (`is_hidden`), so it captures only what the page actually shows: **5** entities (2 AFPs + 3 state pension institutes: IPSFA, ISSS-Unidad de Pensiones, ISP). Lists 1–9 contain no hidden duplicates, so this guard changes only list 10.
 - **FLAG — list 4 name truncated at source**: the page's heading HTML literally reads `Citibank, N.A., Sucursal El Salva` (cut off in SSF's CMS). Kept verbatim as published; the intended full name is *Citibank, N.A., Sucursal El Salvador*. Reviewer may want to correct.
 - **FLAG — list 7 suspended entity**: `Pan American Life Insurance Company (Sucursal El Salvador) Suspendida` carries a "Suspendida" (suspended) tag on the page. Name kept verbatim and `RegulationType='Regulated'` per ticket rule — flag for QA if a different status is preferred.
 - **Run output** saved into this folder as `SV SSF SQL Ready <timestamp>.xlsx`.

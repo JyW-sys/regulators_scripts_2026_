@@ -133,13 +133,31 @@ def add_entity(name, listname, listcode, listlabel, fields=None, cotype=''):
     sqldict['ListCode'].append(listcode)
     sqldict['ListName'].append(listname)
     sqldict['ListLabel'].append(listlabel)
-    sqldict['ListLanguage'].append('ES')
+    sqldict['ListLanguage'].append('EN')
     sqldict['ListProcessDate'].append(processdate)
     bourange_same_length_array(sqldict)
 
 
 def content_lines(content):
     return [x for x in content.get_text('\n', strip=True).split('\n') if x.strip()]
+
+
+# Some SSF pages ship a SECOND, stale copy of an accordion tagged
+# `elementor-hidden-desktop/tablet/mobile` (hidden on every viewport, so no human
+# ever sees it). The pension page (list 10) is one: its visible copy lists ISP but
+# the hidden copy still lists the defunct INPEP, which would otherwise be counted as
+# an extra entity. Skip anything hidden on all devices so we only capture what the
+# page actually shows.
+_HIDDEN_CLASSES = ('elementor-hidden-desktop', 'elementor-hidden-tablet',
+                   'elementor-hidden-mobile', 'elementor-hidden-phone')
+
+
+def is_hidden(el):
+    for anc in [el, *el.parents]:
+        cls = anc.get('class') or []
+        if any(h in cls for h in _HIDDEN_CLASSES):
+            return True
+    return False
 
 
 # entity names / field markers used by the "one accordion == one entity" pages
@@ -149,6 +167,8 @@ def scrape_accordion_title_list(url, listname, listcode, listlabel):
     seen = set()
     n = 0
     for it in soup.select('.elementor-accordion-item'):
+        if is_hidden(it):
+            continue
         te = it.select_one('.elementor-accordion-title')
         if not te:
             continue
@@ -171,6 +191,8 @@ def scrape_nested_accordion(url, listname, listcode, listlabel):
     seen = set()
     n = 0
     for it in soup.select('.elementor-accordion-item'):
+        if is_hidden(it):
+            continue
         te = it.select_one('.elementor-accordion-title')
         category = te.get_text(' ', strip=True) if te else ''
         # strip a leading "N. " numbering used on the securities page
@@ -210,6 +232,8 @@ def scrape_table_heading_list(url, listname, listcode, listlabel):
     seen = set()
     n = 0
     for t in soup.find_all('table'):
+        if is_hidden(t):
+            continue
         head = t.find_previous(['h2', 'h3', 'h4', 'h5'])
         name = head.get_text(' ', strip=True) if head else ''
         if not name or name.lower() in seen:

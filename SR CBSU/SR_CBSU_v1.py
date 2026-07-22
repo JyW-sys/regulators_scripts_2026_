@@ -168,10 +168,9 @@ def tesseract_available():
     return False
 
 
-def ocr_text(path):
-    """OCR fallback for scanned-image PDFs. Extracts the embedded page image
-    with pypdf (no poppler needed) and runs pytesseract. Only reachable when a
-    tesseract binary is present (Windows production box)."""
+def ocr_text_tesseract(path):
+    """OCR via pytesseract. Extracts the embedded page image with pypdf (no
+    poppler needed). Preferred engine on the Windows production box."""
     import pytesseract
     from PIL import Image
     import io
@@ -185,6 +184,79 @@ def ocr_text(path):
     return '\n'.join(chunks)
 
 
+def rapidocr_available():
+    """True if the pure-Python RapidOCR (onnxruntime) engine is importable.
+    Needs no system binary, so it works where tesseract cannot be installed
+    (e.g. the corporate Mac)."""
+    try:
+        import rapidocr_onnxruntime  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+_RAPID_OCR = None
+
+
+def _rapid_page_lines(res, ytol=22):
+    """Rebuild text lines from RapidOCR's per-box output: sort boxes top-to-bottom,
+    group boxes whose vertical centres are within `ytol` px into one line, order
+    left-to-right within the line. This re-joins the item number ('1.') with the
+    name box on the same row, giving the '1.  NAME' layout parse_entities expects."""
+    items = []
+    for box, txt, _score in (res or []):
+        ys = [p[1] for p in box]
+        xs = [p[0] for p in box]
+        items.append((sum(ys) / 4.0, min(xs), txt))
+    items.sort(key=lambda t: (t[0], t[1]))
+    lines, cur, cy = [], [], None
+    for y, x, txt in items:
+        if cy is None or abs(y - cy) <= ytol:
+            cur.append((x, txt))
+            cy = y if cy is None else (cy + y) / 2.0
+        else:
+            cur.sort()
+            lines.append(' '.join(t for _, t in cur))
+            cur, cy = [(x, txt)], y
+    if cur:
+        cur.sort()
+        lines.append(' '.join(t for _, t in cur))
+    return lines
+
+
+def ocr_text_rapidocr(path):
+    """OCR via RapidOCR (PP-OCR / onnxruntime), a pure-Python engine that ships
+    its own models and needs no system binary. Page images are pulled with pypdf.
+    NOTE: PP-OCR occasionally drops spaces inside tightly-kerned all-caps names
+    (e.g. 'SURINAAMSEPOSTSPAARBANK'); such names are flagged for QA, not fixed."""
+    import io
+    import numpy as np
+    from PIL import Image
+    from pypdf import PdfReader
+    from rapidocr_onnxruntime import RapidOCR
+    global _RAPID_OCR
+    if _RAPID_OCR is None:
+        _RAPID_OCR = RapidOCR()
+    reader = PdfReader(path)
+    lines = []
+    for page in reader.pages:
+        for img in page.images:
+            im = Image.open(io.BytesIO(img.data)).convert('RGB')
+            res, _ = _RAPID_OCR(np.array(im))
+            lines.extend(_rapid_page_lines(res))
+    return '\n'.join(lines)
+
+
+def ocr_text(path):
+    """Dispatch to the best available OCR engine: tesseract (preferred), else
+    RapidOCR. Raises RuntimeError if neither is available."""
+    if tesseract_available():
+        return ocr_text_tesseract(path)
+    if rapidocr_available():
+        return ocr_text_rapidocr(path)
+    raise RuntimeError('no OCR engine available (need tesseract or rapidocr-onnxruntime)')
+
+
 def parse_entities(text):
     """Parse the CBvS 'BEKENDMAKING' numbered layout:
         '1.  ENTITY NAME N.V.'
@@ -192,6 +264,10 @@ def parse_entities(text):
     Returns list of dicts. The address line(s) following a numbered name line
     (until the next numbered line / blank gap) are captured; City = token after
     the last comma; Phone/Email pulled by regex if present."""
+    # OCR sometimes emits fullwidth punctuation (e.g. '，' U+FF0C instead of ',').
+    # NFKC folds those back to ASCII so comma-based City/address splitting works.
+    import unicodedata
+    text = unicodedata.normalize('NFKC', text)
     lines = [ln.rstrip() for ln in text.splitlines()]
     entities = []
     current = None
@@ -260,9 +336,10 @@ for nr in sorted(LISTS):
         # Text-based PDF: pdfplumber first, camelot(stream)/tabula as fallback.
         text = extract_text(pdf_path)
     else:
-        # Scanned-image PDF (no text layer). OCR only if tesseract is installed.
-        if tesseract_available():
-            print(f"[INFO] List {nr} ({listname}): no text layer -> running OCR")
+        # Scanned-image PDF (no text layer). OCR with tesseract (preferred) or RapidOCR.
+        if tesseract_available() or rapidocr_available():
+            engine = 'tesseract' if tesseract_available() else 'rapidocr'
+            print(f"[INFO] List {nr} ({listname}): no text layer -> running OCR ({engine})")
             try:
                 text = ocr_text(pdf_path)
             except Exception as e:
@@ -270,8 +347,8 @@ for nr in sorted(LISTS):
                 text = ''
         else:
             print(f"[BLOCKED] List {nr} ({listname}): scanned-image PDF, no text layer, "
-                  f"tesseract not installed -> needs OCR on Windows box. Not fabricating.")
-            blocked.append((nr, listname, 'scanned image, needs OCR (tesseract unavailable)'))
+                  f"no OCR engine (tesseract / rapidocr) -> needs OCR on Windows box. Not fabricating.")
+            blocked.append((nr, listname, 'scanned image, needs OCR (no engine available)'))
             continue
 
     entities = parse_entities(text)

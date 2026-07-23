@@ -30,6 +30,22 @@ os.chdir(scriptfolder)
 tempfolder = os.path.join(scriptfolder, 'tempfolder')  # PDFs are downloaded here
 os.makedirs(tempfolder, exist_ok=True)
 
+# ------ OCR wiring: bundled Windows binaries at the repo root (control server) ------
+# Put the bundled Tesseract-OCR on PATH and point TESSDATA_PREFIX at its language
+# files so image_to_string(lang='eng') can find eng.traineddata. Resolve the bundled
+# poppler bin (pdftoppm) so pages can be rendered to images with pdf2image.
+projectroot = os.path.dirname(scriptfolder)
+_tessdir = os.path.join(projectroot, 'Tesseract-OCR')
+if os.path.isdir(_tessdir):
+    os.environ['PATH'] = _tessdir + os.pathsep + os.environ.get('PATH', '')
+    _tessdata = os.path.join(_tessdir, 'tessdata')
+    if not os.path.isdir(_tessdata):
+        _tessdata = os.path.join(projectroot, 'tessdata')
+    if os.path.isdir(_tessdata):
+        os.environ['TESSDATA_PREFIX'] = _tessdata
+_poppler = os.path.join(projectroot, 'poppler-25.12.0', 'Library', 'bin')
+POPPLER_BIN = _poppler if os.path.isdir(_poppler) else None
+
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'}
 LANDING = 'https://www.cbvs.sr/en/financial-system/payments-systems/suriname-financial-institutions/financial-institutions'
 
@@ -59,10 +75,34 @@ LISTS = {
     4: ('Money Exchange and Money Transfer Houses', 4),
 }
 
+# Which lists to scrape. Start with [1] to validate the OCR path on the control
+# server, then set to [1, 2, 3, 4] to scrape everything.
+LISTS_TO_RUN = [1, 2, 3, 4]
+
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 PHONE_RE = re.compile(r"(?:Tel|Telefoon)[:.\s]*([0-9()+\-/ ]{5,})", re.I)
-# A name line starts with an item number: "1.  REPUBLIC BANK (SURINAME) N.V."
-NUM_RE = re.compile(r"^\s*(\d{1,3})[.)]\s+(.+\S)\s*$")
+# A name line starts with an item number. OCR often loses the dot ("2 STICHTING")
+# so the separator is optional; the preamble gate (below) keeps intro lines such as
+# "4 van de Wet ..." from matching.
+NUM_RE = re.compile(r"^\s*(\d{1,3})[.)]?\s+(.+\S)\s*$")
+# A company-name line ends with a legal-form suffix (N.V. / G.A.). Used to recover
+# an entity whose leading item number was dropped by OCR (e.g. list 1 entry 4,
+# 'SURINAAMSE TRUSTMAATSCHAPPIJ N.V.', where RapidOCR never detected the '4.').
+NAME_TAIL_RE = re.compile(r"(N\.?\s*V\.?|G\.?\s*A\.?)[\"'»)\s]*$", re.I)
+# The BEKENDMAKING closing boilerplate begins here; nothing after it is an entity.
+STOP_RE = re.compile(r"Hierin niet genoemde|Houdstermaatschappij", re.I)
+# Repeated page-footer / letterhead / signature lines to drop wherever they appear.
+NOISE_RE = re.compile(
+    r"Telefoon.*Telefax"
+    r"|wettelijk gestelde|niet onder het toezicht|staan derhalve|voldoen nog niet"
+    r"|ondertoezichtstelling|^Suriname\.?$"
+    r"|^Paramaribo,?\s*\d.*20\d\d"
+    r"|CENTRALE\s*BANK\s*VAN\s*SURINAME"
+    r"|Deputy Governor|Compliance and Internationa|Bancaire Zaken"
+    r"|Economische Aangelegenheden|Monetaire Zaken"
+    r"|^[FW]\.?\s*(Hausil|Orie)|Soekhnandan"
+    r"|^SLRR$|^\d{1,2}$",
+    re.I)
 
 
 def discover_pdf_links():
@@ -152,35 +192,50 @@ def extract_text(path):
 
 
 def tesseract_available():
-    """Resolve a tesseract binary (project Tesseract-OCR folder or PATH)."""
+    """Resolve a tesseract binary (project Tesseract-OCR folder or PATH) and
+    confirm it actually runs. The bundled tesseract.exe exists on disk on every
+    machine, but on a non-Windows dev box (e.g. the Mac) the Windows binary can't
+    execute -- a file-exists check would wrongly pick it and make OCR fail instead
+    of falling back to RapidOCR. So we probe the version before accepting it."""
     import pytesseract
     candidates = [
-        os.path.join(os.path.dirname(scriptfolder), 'Tesseract-OCR', 'tesseract.exe'),
+        os.path.join(projectroot, 'Tesseract-OCR', 'tesseract.exe'),
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
         shutil.which('tesseract') or '',
     ]
     for c in candidates:
         if c and os.path.exists(c):
             pytesseract.pytesseract.tesseract_cmd = c
-            return True
-    if shutil.which('tesseract'):
-        return True
+            try:
+                pytesseract.get_tesseract_version()
+                return True
+            except Exception:
+                continue
     return False
 
 
 def ocr_text_tesseract(path):
-    """OCR via pytesseract. Extracts the embedded page image with pypdf (no
-    poppler needed). Preferred engine on the Windows production box."""
+    """OCR via pytesseract. Preferred engine on the Windows production box.
+    Renders each page to an image with the bundled poppler (pdf2image); this is
+    robust where pypdf's embedded-image extraction silently returns nothing for
+    DCTDecode/JPEG scans on older pypdf builds (the cause of the empty output on
+    the control server). Falls back to pypdf's page.images if poppler is absent."""
     import pytesseract
-    from PIL import Image
-    import io
-    from pypdf import PdfReader
-    reader = PdfReader(path)
-    chunks = []
-    for page in reader.pages:
-        for img in page.images:
-            im = Image.open(io.BytesIO(img.data))
-            chunks.append(pytesseract.image_to_string(im, lang='eng'))
+    images = []
+    try:
+        from pdf2image import convert_from_path
+        images = convert_from_path(path, dpi=300, poppler_path=POPPLER_BIN)
+    except Exception as e:
+        print(f"   [pdf2image render failed, falling back to pypdf images] {e}")
+    if not images:
+        import io
+        from PIL import Image
+        from pypdf import PdfReader
+        reader = PdfReader(path)
+        for page in reader.pages:
+            for img in page.images:
+                images.append(Image.open(io.BytesIO(img.data)))
+    chunks = [pytesseract.image_to_string(im, lang='eng') for im in images]
     return '\n'.join(chunks)
 
 
@@ -271,20 +326,48 @@ def parse_entities(text):
     lines = [ln.rstrip() for ln in text.splitlines()]
     entities = []
     current = None
+    # The BEKENDMAKING preamble ("... maakt bekend, dat ... staan ingeschreven:")
+    # ends with a colon; the numbered list begins on the next line. Gating on it
+    # also drops the intro's "4 van de Wet ..." that would otherwise match NUM_RE.
+    started = False
     for ln in lines:
+        stripped = ln.strip()
+        if not started:
+            if stripped.endswith(':'):
+                started = True
+            continue
+        if STOP_RE.search(stripped):        # closing boilerplate / holding company
+            break
+        if not stripped or NOISE_RE.search(stripped):
+            continue
         m = NUM_RE.match(ln)
         if m:
             if current:
                 entities.append(current)
             current = {'name': m.group(2).strip(), 'addr_lines': []}
-        elif current is not None and ln.strip():
-            # stop collecting once we hit an ALL-CAPS section header line
-            stripped = ln.strip()
-            if stripped.isupper() and len(stripped.split()) <= 6 and ',' not in stripped:
-                entities.append(current)
-                current = None
-                continue
-            current['addr_lines'].append(stripped)
+            continue
+        if current is None:
+            continue
+        # a section sub-header (ends with ':', e.g. "... NIET MEER OPERATIONEEL ZIJN:")
+        if stripped.endswith(':'):
+            entities.append(current)
+            current = None
+            continue
+        # Recover an entity whose leading item number OCR dropped: an ALL-CAPS line
+        # ending in a company suffix (N.V./G.A.) that follows a COMPLETE entity (one
+        # that already has an address). The 'has an address' gate is what tells a new
+        # entity apart from a multi-line name continuation (where the current entity
+        # has no address yet); real section headers never end in N.V./G.A.
+        if current['addr_lines'] and stripped.isupper() and NAME_TAIL_RE.search(stripped):
+            entities.append(current)
+            current = {'name': stripped, 'addr_lines': []}
+            continue
+        # stop collecting once we hit an ALL-CAPS section header line
+        if stripped.isupper() and len(stripped.split()) <= 6 and ',' not in stripped:
+            entities.append(current)
+            current = None
+            continue
+        current['addr_lines'].append(stripped)
     if current:
         entities.append(current)
 
@@ -301,9 +384,13 @@ def parse_entities(text):
         if em:
             email = em.group(0)
             addr = EMAIL_RE.sub('', addr).strip().rstrip(',').strip()
+        # City = token after the last comma, but ignore a trailing status note in
+        # parentheses ("(Ingetrokken ...)", "(respondeert niet, ...)") which would
+        # otherwise be read as the city. The note stays in Address_1.
         city = ''
-        if ',' in addr:
-            city = addr.rsplit(',', 1)[1].strip()
+        city_src = re.sub(r'\s*\([^)]*\)\s*$', '', addr).rstrip(',').strip()
+        if ',' in city_src:
+            city = city_src.rsplit(',', 1)[1].strip()
         out.append({'name': e['name'], 'address': addr, 'city': city,
                     'phone': phone, 'email': email})
     return out
@@ -316,7 +403,7 @@ for nr in sorted(links):
     print(f"  List {nr} ({LISTS[nr][0]}): {links[nr]}")
 
 blocked = []
-for nr in sorted(LISTS):
+for nr in LISTS_TO_RUN:
     listname, listlabel = LISTS[nr]
     url = links.get(nr)
     if not url:

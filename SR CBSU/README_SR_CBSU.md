@@ -17,9 +17,17 @@
 - **PDF parsing**: `pdfplumber` first; `camelot` (flavor='stream') / `tabula`
   as fallback. All four PDFs are pure scanned images (no text layer), so parsing
   actually runs through **OCR**.
-- **OCR engines** (`pypdf` extracts each page image — no poppler needed):
-  1. **Tesseract** (`pytesseract`) — preferred; used automatically when a
-     `tesseract` binary is found (the Windows production box).
+- **OCR engines**:
+  1. **Tesseract** (`pytesseract`) — preferred; used automatically when a working
+     `tesseract` binary is found (the Windows production box, bundled
+     `Tesseract-OCR/` + `tessdata/` at the repo root). Pages are rendered to
+     images with the bundled **poppler** (`pdf2image.convert_from_path`,
+     `poppler-25.12.0/Library/bin`), with `pypdf` `page.images` only as a
+     fallback — `page.images` returns `[]` for these JPEG scans on the Py3.8
+     box's older pypdf, which is what previously produced an empty output.
+     `tesseract_available()` probes `get_tesseract_version()` (not just
+     file-exists) so the bundled Windows `.exe`, which is present but not
+     executable on the Mac, does not block the RapidOCR fallback.
   2. **RapidOCR** (`rapidocr-onnxruntime`, PP-OCR / onnxruntime) — pure-Python
      fallback that ships its own models and needs no system binary, so it runs
      on the corporate Mac where tesseract cannot be installed. The current
@@ -65,6 +73,21 @@ The scraper parses this with a numbered-line regex: the numbered line → **Name
 the following indented line(s) → **Address_1** / **City** (token after the last
 comma), with `Tel:`/`Email` pulled out by regex if present.
 
+Parser hardening for the noisy OCR (`parse_entities`):
+- **Preamble gate** — entities are only collected after the intro sentence that
+  ends with `:` (`... staan ingeschreven:`). This drops the boilerplate intro,
+  including list 4's `4 van de Wet ...` that would otherwise look like item 4.
+- **Optional item-number dot** — RapidOCR often loses the period, emitting
+  `2 STICHTING ...` instead of `2. STICHTING ...`; the number regex treats the
+  `.`/`)` separator as optional so those entries are not dropped or merged.
+- **Noise/stop filtering** — the repeated page footer (`Telefoon ... Telefax`),
+  the closing text (`Hierin niet genoemde ...`), the signature block (`Deputy
+  Governor`, official names) and the `Houdstermaatschappij` holding-company line
+  are skipped, so they no longer pollute the last entity's Address/City.
+- **City parenthetical** — a trailing status note in parentheses
+  (`(Ingetrokken ...)`, `(respondeert niet, ...)`) is ignored when picking City;
+  the note stays inside Address_1.
+
 ## Field mapping
 
 | sqldict field | Source / value |
@@ -83,19 +106,20 @@ comma), with `Tel:`/`Email` pulled out by regex if present.
 
 ## Status / QA
 
-- **UNBLOCKED — 106 rows extracted via OCR** (previously blocked for lack of an
+- **UNBLOCKED — 115 rows extracted via OCR** (previously blocked for lack of an
   OCR engine on the Mac). All four PDFs are pure scanned images (one full-page
   A4 image at ~300 DPI per page, DeviceRGB, **zero text layer**), confirmed with
   `pdfplumber` / `pypdf` (0 characters). They were OCR'd with **RapidOCR**
-  (pure-Python, no system binary) and parsed with the numbered-list parser.
+  (pure-Python, no system binary) and parsed with the hardened numbered-list
+  parser (see PDF structure above).
 
   | ListNr | ListName | Rows |
   |--------|----------|------|
-  | 1 | Other Depository Corporations | 37 |
+  | 1 | Other Depository Corporations | 38 |
   | 2 | Insurance Companies | 11 |
-  | 3 | Pension- and Provident funds | 33 |
-  | 4 | Money Exchange and Money Transfer Houses | 25 |
-  | | **Total** | **106** |
+  | 3 | Pension- and Provident funds | 35 |
+  | 4 | Money Exchange and Money Transfer Houses | 31 |
+  | | **Total** | **115** |
 
 - **Current output**: `SR CBSU SQL Ready <timestamp>.xlsx`, fixed 43-column
   schema, **0 empty names**, address & (mostly) city populated for every row.
@@ -111,11 +135,31 @@ comma), with `Tel:`/`Email` pulled out by regex if present.
   - **Wrapped names**: names that wrap to a second line are captured only up to
     the first line; the continuation is folded into Address_1. Also affects the
     accented spellings (`KOÖPERATIEVE`) rendered without the diaeresis.
-  - **City noise (~13 rows)**: most are correct (`Paramaribo`, or genuine
-    districts `District Wanica / Nickerie / Marowijne / Coronie`), but a few
-    grabbed stray line content instead of a locality (a date `29 januari 2020`,
-    a note `(post geretourneerd als onbestelbaar)`) or are blank where the name
-    wrapped. City is a secondary field here; the full locality is inside Address_1.
+  - **City (mostly clean)**: 94 `Paramaribo`, plus genuine districts
+    (`Commewijne`, `Wanica`, `District Nickerie / Marowijne / Coronie`). The old
+    date/status-note contamination is fixed by the parenthetical rule; **13 rows
+    are blank** where the name wrapped and no address line was captured (see
+    below), and **1 row** (list 1 `T.H.I. G.A.`) still carries a status note
+    because OCR glued the next entity onto the same line.
+  - **Residual OCR drops (name/number/address never read by RapidOCR)** — these
+    are engine limits, not parser bugs, and a Tesseract/Windows run should
+    recover most:
+    - List 1: `DE DIREKTE BELASTINGEN G.A.` is glued into the `T.H.I. G.A.`
+      row; three cooperative rows have wrapped names with no address.
+    - List 2: entry 11's **name** is blank in the scan → its address folds into
+      entry 10; 11 of 12 numbered insurers captured (holding company excluded).
+    - List 3: a few rows have blank addresses; two carry an adjacent entry's
+      address fragment (`21.`, `2.`) where that entry's name was unreadable.
+    - List 4: `N.V. Dallex` is merged into `CYRILL'S EXCHANGE` (no number in
+      OCR); `SURIFAST MONEY EXCHANGE` lost its address line.
+  - **Regulatory status in the source (per-case decision needed)**: several
+    entries carry Dutch status notes now preserved in Address_1 —
+    `Ingetrokken d.d. 29 januari 2020` (**licence withdrawn**: list 4 EURO
+    EXCHANGE, CARIBBEAN MONEYMASTERS), `in proces van ontbinding` / `gerechtelijk
+    proces tot ontbinding` (**in dissolution**), `respondeert niet` (not
+    responding). All rows are currently `RegulationType = Regulated`; confirm
+    whether the withdrawn/dissolving ones should instead be `Cancelled` (with
+    `CancellationDate`).
 - **For the cleanest result, re-run on the Windows production box** (Tesseract +
   tessdata installed). The script **auto-prefers tesseract** when its binary is
   present, so no code change is needed there; Tesseract generally preserves word

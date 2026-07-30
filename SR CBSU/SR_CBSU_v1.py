@@ -85,6 +85,11 @@ PHONE_RE = re.compile(r"(?:Tel|Telefoon)[:.\s]*([0-9()+\-/ ]{5,})", re.I)
 # so the separator is optional; the preamble gate (below) keeps intro lines such as
 # "4 van de Wet ..." from matching.
 NUM_RE = re.compile(r"^\s*(\d{1,3})[.)]?\s+(.+\S)\s*$")
+# A bare item-number box with no name merged onto it (the case _rapid_page_lines'
+# ytol=22 same-line merge misses). Only trusted as an anchor left of ANCHOR_X_MAX --
+# lone page-number stamps in the far-right margin match this shape too.
+ANCHOR_NUM_ONLY_RE = re.compile(r"^\s*(\d{1,3})[.)]?\s*$")
+ANCHOR_X_MAX = 700
 # A company-name line ends with a legal-form suffix (N.V. / G.A.). Used to recover
 # an entity whose leading item number was dropped by OCR (e.g. list 1 entry 4,
 # 'SURINAAMSE TRUSTMAATSCHAPPIJ N.V.', where RapidOCR never detected the '4.').
@@ -98,7 +103,7 @@ NOISE_RE = re.compile(
     r"|ondertoezichtstelling|^Suriname\.?$"
     r"|^Paramaribo,?\s*\d.*20\d\d"
     r"|CENTRALE\s*BANK\s*VAN\s*SURINAME"
-    r"|Deputy Governor|Compliance and Internationa|Bancaire Zaken"
+    r"|Deputy Governor|Compliance\s*and\s*Internationa|Bancaire Zaken"
     r"|Economische Aangelegenheden|Monetaire Zaken"
     r"|^[FW]\.?\s*(Hausil|Orie)|Soekhnandan"
     r"|^SLRR$|^\d{1,2}$",
@@ -214,13 +219,11 @@ def tesseract_available():
     return False
 
 
-def ocr_text_tesseract(path):
-    """OCR via pytesseract. Preferred engine on the Windows production box.
-    Renders each page to an image with the bundled poppler (pdf2image); this is
+def _render_pdf_pages(path):
+    """Render each page to an image with the bundled poppler (pdf2image); this is
     robust where pypdf's embedded-image extraction silently returns nothing for
     DCTDecode/JPEG scans on older pypdf builds (the cause of the empty output on
     the control server). Falls back to pypdf's page.images if poppler is absent."""
-    import pytesseract
     images = []
     try:
         from pdf2image import convert_from_path
@@ -235,8 +238,35 @@ def ocr_text_tesseract(path):
         for page in reader.pages:
             for img in page.images:
                 images.append(Image.open(io.BytesIO(img.data)))
-    chunks = [pytesseract.image_to_string(im, lang='eng') for im in images]
-    return '\n'.join(chunks)
+    return images
+
+
+def ocr_boxes_tesseract(path):
+    """OCR via pytesseract. Preferred engine on the Windows production box.
+    Returns positioned rows (page, y, x, text) -- grouped by Tesseract's own
+    block/paragraph/line numbers -- instead of a joined string, so
+    parse_entities_geometric can segment entities by row position rather than
+    requiring the item number and name to land on the same merged line."""
+    import pytesseract
+    from pytesseract import Output
+    images = _render_pdf_pages(path)
+    boxes = []
+    for pi, im in enumerate(images):
+        data = pytesseract.image_to_data(im, lang='eng', output_type=Output.DICT)
+        rows = {}
+        for i in range(len(data['text'])):
+            word = data['text'][i].strip()
+            if not word:
+                continue
+            key = (data['block_num'][i], data['par_num'][i], data['line_num'][i])
+            rows.setdefault(key, []).append(
+                (data['left'][i], data['top'][i] + data['height'][i] / 2.0, word))
+        for words in rows.values():
+            words.sort(key=lambda w: w[0])
+            y = sum(w[1] for w in words) / len(words)
+            x = words[0][0]
+            boxes.append((pi, y, x, ' '.join(w[2] for w in words)))
+    return boxes
 
 
 def rapidocr_available():
@@ -253,35 +283,44 @@ def rapidocr_available():
 _RAPID_OCR = None
 
 
-def _rapid_page_lines(res, ytol=22):
-    """Rebuild text lines from RapidOCR's per-box output: sort boxes top-to-bottom,
-    group boxes whose vertical centres are within `ytol` px into one line, order
-    left-to-right within the line. This re-joins the item number ('1.') with the
-    name box on the same row, giving the '1.  NAME' layout parse_entities expects."""
+def _rapid_page_rows(res, ytol=22):
+    """Group RapidOCR's per-box output into row-boxes: sort boxes top-to-bottom,
+    group boxes whose vertical centres are within `ytol` px into one row (so
+    wrapped word-boxes on the same visual line still combine), order left-to-right
+    within the row. Unlike the old line-joining version, the row's own position
+    (y, x) is kept -- callers need it to segment entities by geometry rather than
+    requiring the item number and name to land on the same merged row."""
     items = []
     for box, txt, _score in (res or []):
         ys = [p[1] for p in box]
         xs = [p[0] for p in box]
         items.append((sum(ys) / 4.0, min(xs), txt))
     items.sort(key=lambda t: (t[0], t[1]))
-    lines, cur, cy = [], [], None
+
+    def flatten(cur):
+        cur.sort(key=lambda t: t[0])  # left to right
+        y = sum(t[1] for t in cur) / len(cur)
+        return (y, cur[0][0], ' '.join(t[2] for t in cur))
+
+    rows, cur, cy = [], [], None
     for y, x, txt in items:
         if cy is None or abs(y - cy) <= ytol:
-            cur.append((x, txt))
+            cur.append((x, y, txt))
             cy = y if cy is None else (cy + y) / 2.0
         else:
-            cur.sort()
-            lines.append(' '.join(t for _, t in cur))
-            cur, cy = [(x, txt)], y
+            rows.append(flatten(cur))
+            cur, cy = [(x, y, txt)], y
     if cur:
-        cur.sort()
-        lines.append(' '.join(t for _, t in cur))
-    return lines
+        rows.append(flatten(cur))
+    return rows  # list of (y, x, text)
 
 
-def ocr_text_rapidocr(path):
+def ocr_boxes_rapidocr(path):
     """OCR via RapidOCR (PP-OCR / onnxruntime), a pure-Python engine that ships
     its own models and needs no system binary. Page images are pulled with pypdf.
+    Returns positioned rows (page, y, x, text) instead of a joined string, so
+    parse_entities_geometric can segment entities by row position rather than
+    requiring the item number and name to land on the same merged line.
     NOTE: PP-OCR occasionally drops spaces inside tightly-kerned all-caps names
     (e.g. 'SURINAAMSEPOSTSPAARBANK'); such names are flagged for QA, not fixed."""
     import io
@@ -293,22 +332,24 @@ def ocr_text_rapidocr(path):
     if _RAPID_OCR is None:
         _RAPID_OCR = RapidOCR()
     reader = PdfReader(path)
-    lines = []
-    for page in reader.pages:
+    boxes = []
+    for pi, page in enumerate(reader.pages):
         for img in page.images:
             im = Image.open(io.BytesIO(img.data)).convert('RGB')
             res, _ = _RAPID_OCR(np.array(im))
-            lines.extend(_rapid_page_lines(res))
-    return '\n'.join(lines)
+            for y, x, txt in _rapid_page_rows(res):
+                boxes.append((pi, y, x, txt))
+    return boxes
 
 
-def ocr_text(path):
-    """Dispatch to the best available OCR engine: tesseract (preferred), else
-    RapidOCR. Raises RuntimeError if neither is available."""
+def ocr_boxes(path):
+    """Dispatch to the best available OCR engine, returning positioned rows
+    (page, y, x, text): tesseract (preferred), else RapidOCR. Raises RuntimeError
+    if neither is available."""
     if tesseract_available():
-        return ocr_text_tesseract(path)
+        return ocr_boxes_tesseract(path)
     if rapidocr_available():
-        return ocr_text_rapidocr(path)
+        return ocr_boxes_rapidocr(path)
     raise RuntimeError('no OCR engine available (need tesseract or rapidocr-onnxruntime)')
 
 
@@ -396,6 +437,187 @@ def parse_entities(text):
     return out
 
 
+def _is_section_header(stripped):
+    """ALL-CAPS short line (roman-numeral run titles included, e.g. 'I. PRIMAIRE
+    BANKEN') or a line ending in ':' (a run's own sub-heading, e.g. '... NIET MEER
+    OPERATIONEEL ZIJN:') -- either closes whatever entity is open and resets the
+    anchor state for the next 1..N run."""
+    return (stripped.endswith(':')
+            or (stripped.isupper() and len(stripped.split()) <= 6 and ',' not in stripped))
+
+
+def parse_entities_geometric(boxes):
+    """Segment numbered entities from positioned OCR rows (page, y, x, text) by
+    the position of item-number anchors, instead of requiring the number and name
+    to be merged onto one reconstructed text line (parse_entities's approach,
+    still used for the text-layer path). A single PDF holds several independent
+    1..N runs, one per section heading; each header resets the anchor state the
+    same way parse_entities does.
+
+    Fixes entity loss seen with the line-based parser: when OCR places the number
+    far from the name, or drops the number/name merge, the previous parser folded
+    the real entity's text into the prior entity (or silently dropped a bare digit
+    as noise). Here every row keeps its own (page, y, x), so:
+      - a bare number row (no name attached) still opens a new entity -- its name
+        is recovered from the next content row(s) instead of being discarded;
+      - a content run with no active entity (the run's first item never got a
+        number at all) still opens an entity instead of being lost;
+      - within an entity, once an address line has appeared, a later ALL-CAPS row
+        ending in a legal suffix (N.V./G.A.) still splits off as a new entity --
+        recovers an entity whose own number was never OCR'd at all.
+    Genuinely name-blank slots (the OCR never produced a name at all) still come
+    out with name='' and are filtered out downstream like today."""
+    import unicodedata
+    rows = sorted(
+        ((pi, y, x, unicodedata.normalize('NFKC', txt)) for pi, y, x, txt in boxes),
+        key=lambda r: (r[0], r[1], r[2]))
+
+    def _scan_ahead_is_header(start_idx):
+        """From start_idx onward, skip rows that are themselves ALL-CAPS with no
+        comma (name-continuation-shaped or nested-header-shaped -- either way,
+        not yet decisive) to find the first row that settles it: a number
+        anchor confirms the row being judged really is a header (a numbered
+        entity follows, however many more header-shaped lines come first --
+        e.g. a colon-ending header immediately followed by a second short
+        all-caps sub-header); an address-shaped row (has a comma, or isn't
+        all-caps) confirms it's actually unnumbered entity content that only
+        happens to look like a header (e.g. a run's first entity whose own
+        number was never OCR'd, or an entity whose header-shaped closing row
+        is really the *next* entity's name)."""
+        for _pi2, _y2, x2, txt2 in rows[start_idx:]:
+            s2 = txt2.strip()
+            if not s2:
+                continue
+            if STOP_RE.search(s2):
+                break
+            if (ANCHOR_NUM_ONLY_RE.match(s2) and x2 < ANCHOR_X_MAX) or NUM_RE.match(s2):
+                return True
+            if ',' in s2 or not s2.isupper():
+                return False
+        return True
+
+    entities = []
+    current = None        # {'name': str, 'addr_lines': [str]}
+    started = False        # preamble gate, same semantics as parse_entities()
+
+    def close_current():
+        nonlocal current
+        if current:
+            entities.append(current)
+        current = None
+
+    for i, (_pi, _y, x, txt) in enumerate(rows):
+        stripped = txt.strip()
+        if not stripped:
+            continue
+        if not started:
+            if stripped.endswith(':'):
+                started = True
+            continue
+        if STOP_RE.search(stripped):        # closing boilerplate / holding company
+            break
+
+        m_bare = ANCHOR_NUM_ONLY_RE.match(stripped)
+        if m_bare and x < ANCHOR_X_MAX:
+            close_current()
+            current = {'name': '', 'addr_lines': []}
+            continue
+
+        m_num = NUM_RE.match(stripped)
+        if m_num:
+            close_current()
+            current = {'name': m_num.group(2).strip(), 'addr_lines': []}
+            continue
+
+        if NOISE_RE.search(stripped):
+            continue
+
+        # Still-open, possibly multi-row name (e.g. "...G.A.(SPAAR EN KREDIET
+        # KOOPERATIE" then "A.D.B.)", or "SURIFAST MONEY EXCHANGE N.V." then
+        # "(VOORHEEN JOHN-RUS EXCHANGE N.V.)") must win over the section-header
+        # check below: a short ALL-CAPS continuation fragment looks exactly like
+        # a header (<=6 words, no comma) but is really the rest of the name. No
+        # address line has been seen yet for this entity -- that's what tells a
+        # continuation apart from a genuine header, regardless of whether the
+        # name started from a bare anchor or one merged with the item number.
+        if current is not None and not current['addr_lines'] and stripped.isupper():
+            current['name'] = (current['name'] + ' ' + stripped).strip()
+            continue
+
+        # An ALL-CAPS line ending in a legal suffix (N.V./G.A.), arriving once an
+        # address has already started, is an entity whose own number was never
+        # OCR'd at all (e.g. "SURINAAMSETRUSTMAATSCHAPPIJN.V." -- one glued word,
+        # so it also happens to look like a short section header). Must be
+        # checked before _is_section_header: real section headers in this data
+        # never end in N.V./G.A., so this can't misfire on a genuine header.
+        if current is not None and current['addr_lines'] and stripped.isupper() \
+                and NAME_TAIL_RE.search(stripped):
+            close_current()
+            current = {'name': stripped, 'addr_lines': []}
+            continue
+
+        if _is_section_header(stripped):
+            # Always ambiguous, whether or not an entity is currently open: this
+            # row could be a genuine (possibly second, back-to-back) section
+            # header -- e.g. a colon-ending header immediately followed by a
+            # short all-caps sub-header, "PENSIOEN- EN VOORZIENINGSFONDSEN ...
+            # ZIJN:" then "PENSIOENFONDSEN" -- or it could actually be an
+            # entity's own name whose number box was never OCR'd, which just
+            # happens to be short/glued ALL-CAPS and so is equally
+            # header-shaped. That mis-shaped name can surface two ways: as a
+            # run's first entity (current is None, e.g. "PENSIOENFONDSEN"
+            # header directly followed by "STICHTINGPENSIOENFONDS...
+            # WATERLEIDING"), or as the very row that appears to close a
+            # *different*, already-open entity while really starting the next
+            # one (current is not None, e.g. entry 2's address is still
+            # accumulating when "STICHTING PENSIOENFONDS VOOR DE..." arrives --
+            # that row must close entry 2 *and* seed a new entity from itself,
+            # not be discarded). Tell genuine headers apart from either case by
+            # what comes right after: a genuine header's own first entity is
+            # introduced by a number anchor (however many more header-shaped
+            # lines intervene); a mis-shaped name is instead followed directly
+            # by address content (a comma, or non-upper text) with no number
+            # ever appearing first.
+            if _scan_ahead_is_header(i + 1):
+                close_current()
+                continue
+            close_current()
+            current = {'name': stripped, 'addr_lines': []}
+            continue
+
+        if current is None:
+            current = {'name': '', 'addr_lines': []}
+            if stripped.isupper():
+                current['name'] = stripped
+                continue
+            current['addr_lines'].append(stripped)
+            continue
+
+        current['addr_lines'].append(stripped)
+    close_current()
+
+    out = []
+    for e in entities:
+        addr = ' '.join(e['addr_lines']).strip()
+        phone = ''
+        pm = PHONE_RE.search(addr)
+        if pm:
+            phone = pm.group(1).strip()
+            addr = addr[:pm.start()].strip().rstrip(',').strip()
+        email = ''
+        em = EMAIL_RE.search(addr)
+        if em:
+            email = em.group(0)
+            addr = EMAIL_RE.sub('', addr).strip().rstrip(',').strip()
+        city = ''
+        city_src = re.sub(r'\s*\([^)]*\)\s*$', '', addr).rstrip(',').strip()
+        if ',' in city_src:
+            city = city_src.rsplit(',', 1)[1].strip()
+        out.append({'name': e['name'], 'address': addr, 'city': city,
+                    'phone': phone, 'email': email})
+    return out
+
+
 # ------------------------------------------------ Begin_ scraping ----------------------------------------
 links = discover_pdf_links()
 print("Discovered PDF links:")
@@ -421,24 +643,30 @@ for nr in LISTS_TO_RUN:
 
     if pdf_has_text_layer(pdf_path):
         # Text-based PDF: pdfplumber first, camelot(stream)/tabula as fallback.
+        # None of the 4 CBSU PDFs have a text layer today, so this path is
+        # dormant; left as-is (line-based parse_entities), no need for the
+        # geometric parser here since there's no box position to segment by.
         text = extract_text(pdf_path)
+        entities = parse_entities(text)
     else:
-        # Scanned-image PDF (no text layer). OCR with tesseract (preferred) or RapidOCR.
+        # Scanned-image PDF (no text layer). OCR with tesseract (preferred) or RapidOCR,
+        # then segment entities by OCR box geometry (position), not same-line text
+        # merging -- see parse_entities_geometric for why.
         if tesseract_available() or rapidocr_available():
             engine = 'tesseract' if tesseract_available() else 'rapidocr'
             print(f"[INFO] List {nr} ({listname}): no text layer -> running OCR ({engine})")
             try:
-                text = ocr_text(pdf_path)
+                boxes = ocr_boxes(pdf_path)
+                entities = parse_entities_geometric(boxes)
             except Exception as e:
                 print(f"[WARN] List {nr} ({listname}): OCR failed ({e})")
-                text = ''
+                entities = []
         else:
             print(f"[BLOCKED] List {nr} ({listname}): scanned-image PDF, no text layer, "
                   f"no OCR engine (tesseract / rapidocr) -> needs OCR on Windows box. Not fabricating.")
             blocked.append((nr, listname, 'scanned image, needs OCR (no engine available)'))
             continue
 
-    entities = parse_entities(text)
     entities = [e for e in entities if e['name']]
     if not entities:
         print(f"[BLOCKED] List {nr} ({listname}): no entities parsed from extracted text -> needs review.")

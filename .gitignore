@@ -75,3 +75,29 @@ desktop.ini
 *.exe
 *.dll
 
+
+# Credential screenshots — never commit
+FR ACP/API_Key_Regafi.png
+FR ACP/FR_ACP_API_ScreteKey.png
+*API*Key*.png
+*Secret*.png
+*ScreteKey*.png
+
+# Downloaded tool installers / data bundles
+*.zip
+*.msi
+*.crdownload
+
+# Debug artifacts
+**/_debug/
+**/_debug_*.py
+
+# MCP / browser automation scratch
+.playwright-mcp/
+**/downloaded_files/
+CN CSRC/www.csrc.gov.cn/
+
+# Misplaced scrape outputs
+MX CNSF/total_csv
+CN NFRA/*.xlx
+US FFIEC/[0-9a-f]*-[0-9a-f]*-*

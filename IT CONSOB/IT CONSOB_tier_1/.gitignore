@@ -1,0 +1,7 @@
+# never commit scraped output, browser profiles, or clearance cookies
+*.xlsx
+*.csv
+uc_profile/
+dp_profile/
+clearance_cookies.json
+__pycache__/

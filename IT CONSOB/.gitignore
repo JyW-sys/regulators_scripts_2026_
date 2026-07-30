@@ -1,0 +1,6 @@
+# Scraped output is never committed (project CLAUDE.md)
+*.xlsx
+*.csv
+tempfolder/
+# Chrome profiles holding Radware clearance cookies
+dp_profile_v2/

@@ -1,0 +1,5 @@
+# never commit scraped output or Radware clearance cookies
+*.xlsx
+*.csv
+clearance_cookies.json
+__pycache__/

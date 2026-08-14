@@ -12,11 +12,13 @@ assumed. Diagnosis (2026-07-29, live):
    renders 47-77 entity tables. So "200 OK + empty result" was silently producing
    empty lists -- this, not the captcha, is the primary breakage.
 
-2. **Radware Bot Manager is rate-triggered, not an always-on wall.** The
-   `hcaptcha.png` in this folder is mislabeled: the challenge is Radware
-   (redirects to `validate.perfdrive.com`, serves "Radware Captcha Page").
+2. **Radware Bot Manager is rate-triggered, not an always-on wall.** Blocked
+   traffic redirects to `validate.perfdrive.com` and serves a "Radware Captcha
+   Page" -- whose challenge widget is hCaptcha, so `hcaptcha.png` here is not
+   mislabeled: Radware is the bot manager, hCaptcha is the box you tick.
    Single paced page loads pass fine; ~26 rapid requests get the IP flagged --
    which is what list 7's A-Z loop does. Hence the jittered pacing + backoff here.
+   The intended way through is to **click it by hand** -- see wait_for_human_solve().
 
 3. **List 8 (`mtf-authorised-consob`) is HTTP 404 upstream.** It is a dead link on
    CONSOB's own /markets page, i.e. CONSOB's regression, not ours. Handled as a
@@ -50,7 +52,9 @@ import datetime
 import os
 import random
 import re
+import select
 import string
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -58,6 +62,14 @@ from collections import defaultdict
 import pandas as pd
 from bs4 import BeautifulSoup
 from DrissionPage import ChromiumOptions, ChromiumPage
+
+# Line-buffer stdout: this run is normally watched through a log file or a
+# wrapper shell, and block buffering would hide the captcha banner until the
+# process ended -- i.e. exactly when it is no longer actionable.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 # --------------------------------------------------------------------------
 # Begin_fileName / workspace
@@ -91,23 +103,33 @@ else:
 DP_PROFILE = os.path.join(scriptfolder, 'dp_profile_v2')
 
 # ---- Manual captcha solving ----------------------------------------------
-# The operator can solve the Radware tile challenge by hand, which is far more
-# reliable than any automated bypass. When INTERACTIVE is on, a Radware hit
-# pauses the run, brings Chrome to the front and waits for you to click through;
-# the clearance cookie then lands in DP_PROFILE, so you normally solve ONCE and
-# every later page (and later run) sails past.
+# The operator solves the Radware tile challenge by hand in the Chrome window --
+# far more reliable than any bypass. The run then RESUMES BY ITSELF: it detects
+# the solve by polling the live page, it does not wait for a keypress.
 #
-# Auto-detected from the terminal so the same file still works unattended in the
-# Control Room -- there it falls back to timed backoff instead of hanging on a
-# prompt nobody can answer. Force it either way with:
-#     CONSOB_INTERACTIVE=1   (always ask)   /   CONSOB_INTERACTIVE=0   (never ask)
+# That distinction matters. An earlier revision blocked on input(); whenever the
+# script was launched from a wrapper, an IDE or a scheduler, stdin was not a
+# terminal, input() raised EOFError immediately and the manual path was skipped
+# without anyone noticing. Polling the browser needs no keyboard at all: click
+# the tiles, and the run picks the page back up within ~2 s.
+#
+# Pressing Enter still works as a manual override when stdin *is* a terminal
+# (useful if Radware lands you somewhere unexpected after the solve).
+#
+# CONSOB_MANUAL_WAIT  seconds to wait for a human per challenge (default 300)
+# CONSOB_INTERACTIVE=0  never wait for a human; timed backoff only (Control Room)
+MANUAL_WAIT = int(os.environ.get('CONSOB_MANUAL_WAIT', '300'))
+
 _env_interactive = os.environ.get('CONSOB_INTERACTIVE')
 if _env_interactive is not None:
     INTERACTIVE = _env_interactive.strip() not in ('0', 'false', 'False', '')
 else:
-    INTERACTIVE = sys.stdin is not None and sys.stdin.isatty()
+    # Default ON. Unattended runs degrade safely: the first challenge that nobody
+    # solves within MANUAL_WAIT flips manual mode off for the rest of the run, so
+    # the worst case is one wasted wait window, not one per page.
+    INTERACTIVE = True
 
-_manual = {'enabled': INTERACTIVE}   # flipped off if the operator says "skip all"
+_manual = {'enabled': INTERACTIVE}   # flipped off on 's' or on an unanswered wait
 
 # --------------------------------------------------------------------------
 # Begin_Variable
@@ -274,31 +296,98 @@ def is_blocked(page):
             or 'we apologize for the inconvenience' in low)
 
 
-def solve_by_hand(page, attempt, tries):
-    """Hand the browser to the operator to click the Radware captcha.
+def alert(message):
+    """Get the operator's attention: terminal bell + a macOS notification.
 
-    Returns True if we should keep prompting on later blocks, False if the
-    operator asked to stop being asked (then we fall back to timed backoff).
+    The captcha can appear 20 minutes into a run, long after anyone stopped
+    watching the window. Best effort only -- never let this break the scrape.
+    """
+    print('\a', end='')
+    if sys.platform == 'darwin':
+        try:
+            subprocess.run(
+                ['osascript', '-e',
+                 'display notification "{}" with title "IT CONSOB" sound name "Glass"'
+                 .format(message.replace('"', "'"))],
+                check=False, timeout=5,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
+def enter_pressed(timeout):
+    """Non-blocking read of stdin. Returns the typed line, or None on timeout.
+
+    Only ever consulted as an override -- the solve is normally detected from
+    the page itself, so this returning None forever is a perfectly fine state.
+    """
+    try:
+        if not (sys.stdin and sys.stdin.isatty()):
+            time.sleep(timeout)
+            return None
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        if ready:
+            return sys.stdin.readline()
+    except Exception:
+        time.sleep(timeout)
+    return None
+
+
+def wait_for_human_solve(page, url):
+    """Pause on a Radware challenge and let the operator click it.
+
+    Brings Chrome to the front, then polls the live page until the challenge is
+    gone. Returns True once it clears (the caller re-requests the URL with the
+    fresh clearance), False if MANUAL_WAIT elapsed with nobody there.
     """
     try:                       # make sure the window can't be missed
         page.set.window.max()
         page.set.activate()
     except Exception:
         pass
-    print("\n" + "=" * 70)
-    print("  RADWARE CAPTCHA  -  attempt {}/{}".format(attempt, tries))
-    print("  A Chrome window is open on the challenge page.")
-    print("  1. Solve the captcha in that window.")
-    print("  2. Wait until the real CONSOB page appears.")
-    print("  3. Come back here and press Enter.")
-    print("  (The clearance is saved in dp_profile_v2/, so this is normally a")
-    print("   ONE-TIME step for the whole run.)")
-    print("=" * 70)
-    try:
-        answer = input("  Press Enter when solved  [or type 's' to stop asking]: ")
-    except EOFError:           # stdin vanished (piped/scheduled run)
-        return False
-    return answer.strip().lower() not in ('s', 'skip')
+
+    alert('Captcha waiting - solve it in the Chrome window')
+    print("\n" + "=" * 72)
+    print("  >>> RADWARE CAPTCHA - PLEASE SOLVE IT IN THE CHROME WINDOW <<<")
+    print("  url : {}".format(url))
+    print("  1. Click through the captcha in the Chrome window that just came")
+    print("     to the front.")
+    print("  2. That's it. Nothing to type here -- the run detects the solve on")
+    print("     its own and continues within ~2 seconds.")
+    print("  (Clearance is saved in dp_profile_v2/, so this is normally a")
+    print("   ONE-TIME step for the whole run, and often for several days.)")
+    print("  Waiting up to {}s.  [terminal only: Enter = resume now, s = stop asking]"
+          .format(MANUAL_WAIT))
+    print("=" * 72)
+
+    deadline = time.time() + MANUAL_WAIT
+    last_beat = 0.0
+    while time.time() < deadline:
+        typed = enter_pressed(2.0)
+        if typed is not None:
+            if typed.strip().lower() in ('s', 'skip'):
+                _manual['enabled'] = False
+                print("      -> manual mode off; timed backoff for the rest of the run")
+                return False
+            print("      -> resuming (manual override)")
+            return True
+
+        try:
+            if not is_blocked(page):
+                print("      -> captcha cleared, resuming")
+                return True
+        except Exception:
+            pass               # mid-navigation; just look again next tick
+
+        left = deadline - time.time()
+        if time.time() - last_beat >= 15:
+            last_beat = time.time()
+            print("      ... still waiting for the captcha ({:.0f}s left)".format(left))
+
+    print("      !! nobody solved it within {}s -- assuming unattended run."
+          .format(MANUAL_WAIT))
+    _manual['enabled'] = False
+    return False
 
 
 def load_page(page, url, selector=None, tries=3, settle=2.0):
@@ -321,13 +410,10 @@ def load_page(page, url, selector=None, tries=3, settle=2.0):
             time.sleep(5)
             continue
         if is_blocked(page):
-            if _manual['enabled']:
-                # Let the operator click it. Far more reliable than any bypass,
-                # and the clearance cookie persists for the rest of the run.
-                if not solve_by_hand(page, attempt, tries):
-                    _manual['enabled'] = False
-                    print("      -> switching to unattended backoff for the rest of the run")
-            else:
+            # Let the operator click it. Far more reliable than any bypass, and
+            # the clearance cookie persists for the rest of the run.
+            solved = wait_for_human_solve(page, url) if _manual['enabled'] else False
+            if not solved:
                 backoff = 20 * attempt + random.uniform(0, 10)
                 print("      Radware challenge on attempt {}/{}. Cooling down {:.0f}s."
                       .format(attempt, tries, backoff))
@@ -476,14 +562,27 @@ driver = ChromiumPage(options)
 driver.set.timeouts(base=10, page_load=45, script=30)
 
 print("Captcha mode: {}".format(
-    "MANUAL - the run will pause and ask you to click any Radware captcha"
+    "MANUAL - solve any captcha in the Chrome window; the run resumes on its own "
+    "(waits up to {}s, nothing to type)".format(MANUAL_WAIT)
     if INTERACTIVE else
-    "UNATTENDED - timed backoff (no prompts; set CONSOB_INTERACTIVE=1 to be asked)"))
+    "UNATTENDED - timed backoff only (set CONSOB_INTERACTIVE=1 to solve by hand)"))
 
 # --------------------------------------------------------------------------
 # Begin_Main
 # --------------------------------------------------------------------------
 counts, problems = {}, []
+
+# Warm-up handshake: touch one real page before the scrape starts. If Radware is
+# going to challenge us, far better it happens now -- while the operator is still
+# watching the terminal -- than 20 minutes into list 7's A-Z loop. Clearance then
+# covers the rest of the run.
+print("[INFO] : Warm-up - opening CONSOB once to settle any captcha up front")
+if load_page(driver, regdict[regulatorName + ' 5']['url'],
+             selector=ENTITY_SELECTOR, tries=2):
+    print("    -> clear, starting the scrape")
+else:
+    print("    -> still blocked after warm-up; continuing anyway, "
+          "each list will retry")
 
 try:
     for k, reg in enumerate(regdict):

@@ -10,8 +10,17 @@
 
 ## Script
 
-- **Current Version**: `VC_FSAVC_v1.py`
+- **Current Version**: `VC_FSAVC_v2.py`
 - **Approach**: 8 plain WordPress pages (LiteSpeed cache). Plain `requests` with a desktop User-Agent and `verify=False` returns HTTP 200 with full content for every URL — no Cloudflare/WAF challenge encountered, so **DrissionPage was not needed**. Parsed with BeautifulSoup.
+
+### v2 changes (vs `VC_FSAVC_v1.py`)
+
+1. **ListNr 4 contact-block bug (the defect in the v1 output file).** v1 only read a following `<p>` for the address/`Tel:`/`Fax:`/`Email:` block. 4 of the 15 entities publish their contact block inside a `<div class="tb_text_wrap">` (Elementor text-editor widget, `<br>`/`<div>`-separated lines) instead of a `<p>` — *Lex Mercatoria Fiduciary Ltd.*, *GOLD IN (ST. VINCENT) CO., LTD.*, *CARIBBEAN TRUST COMPANY LTD*, *ST. VINCENT TRUST AND ESCROW LTD*. v1 emitted those 4 rows with empty `Address_1`/`City`/`Phone`/`Fax`/`Email`/`Website` and this README wrongly recorded it as "no contact block on the page". v2 accepts both shapes → **15/15** contact blocks.
+2. **Phone labels widened.** Those `<div>` blocks use `Office Land Line:` and `Mobile Contact:` rather than `Tel:`, so fixing (1) alone would still have lost the number. v2 captures `Tel`/`Telephone`/`Phone`/`Office Land Line`/`Mobile Contact`/`Mobile`/`Cell`, joining multiple numbers with `" / "`.
+3. **Tables selected by header text instead of positional index.** v1 used `tables1[0]`, `tables2[:6]`, … — a hard-coded index silently yields wrong data the day the source inserts or removes a table. v2 drops fee/rate schedules by header (`Fee`, `Asset Size`, `Class of License`, `Statutory Deposit`) and dispatches each entity table on its own header row.
+4. **Per-list expected row counts asserted at the end** of the run, so a structural change on the source fails loudly instead of passing QA.
+
+Row counts (180), `ListLabel`, `License_Type`, `RegCtry`/`RegCode`/`ListLanguage`/`ListCode` and the ListNr 1 Sales-Representatives decision are **unchanged** from v1 — all were re-verified row-by-row against the live pages and match the source exactly. The only cells that differ between the v1 and v2 outputs are the 4 ListNr 4 contact blocks above (`Address_1` 4, `City` 4, `Phone` 4, `Email` 4, `Fax` 1, `Website` 2).
 
 ## List Types
 
@@ -33,7 +42,7 @@ Every page is an `<h2>`/`<h3>`-headed WordPress article containing one or more H
 - **ListNr 1** has 11 tables total. The first 8 are entity tables (Registered Pension Plans; Motor & General Insurance Companies; Long Term Insurance Companies; Insurance Agents; Insurance Brokers/Adjusters/Association of Underwriters; International Insurance Companies; International Insurance Intermediaries; Insurance Sales Representatives); the last 3 are fee schedules and are skipped. The "Insurance Sales Representatives" table is 2-column (`Insurance Company | Sales Representative(s)`, the latter a comma-separated list of individual people) — the entity being registered is the **insurance company**, so `Name` is taken from column 1; the sales-representative names in column 2 are not captured anywhere in the schema (no "represents" field exists), same information-loss tradeoff as the Insurance Agents table below.
 - **ListNr 2** has 7 tables; the first 6 share the same 3-column shape (`Name of Mutual Fund(...) | Type of Mutual Funds | Status`) and are unioned; the 7th ("Fee Schedule: Mutual Funds") is skipped.
 - **ListNr 3** has 2 tables: active licensed international banks (`International Bank | License Class | Address | Main Contact`) and banks under liquidation (`International Bank Under Liquidation | Class | Liquidator`).
-- **ListNr 4** is *not* a table — under the "Currently Registered Agents/Trustees/Service Providers:" heading the page alternates `<h5>`/`<h4>` entity-name headings with a `<p>` contact block (address / `Tel:` / `Fax:` / `Email:` / `Web:`). The walk stops at the "Quick Links"/"Useful Links" footer headings, which sit immediately after the last real entity in the DOM. 3 of the 15 entities (Lex Mercatoria Fiduciary Ltd., Gold In (St. Vincent) Co., Ltd., Caribbean Trust Company Ltd) have no contact `<p>` on the page at all — left blank, not a parsing gap.
+- **ListNr 4** is *not* a table — under the "Currently Registered Agents/Trustees/Service Providers:" heading the page alternates `<h5>`/`<h4>` entity-name headings with a contact block (address / `Tel:` / `Fax:` / `Email:` / `Web:`). **The contact block is a `<p>` for 11 entities and a `<div class="tb_text_wrap">` for the other 4** (see v2 changes above); both are accepted. The site footer tagline is also a `<p>`, so a block only counts when it carries a `Tel:`/`Email:`/`Fax:`/`Web:`-style label. The walk stops at the "Quick Links"/"Useful Links" footer headings, which sit immediately after the last real entity in the DOM.
 - **ListNr 5** takes only the "Name of Credit Union" table; the asset-size fee-schedule table is skipped.
 - **ListNr 6** takes the single "Building Societies" table (1 entity).
 - **ListNr 7** takes the "Name of Society | Name of Society (Continued)" table, which is laid out as **two name columns side by side** purely to fit the page — both columns are flattened into individual entity rows. The fee table is skipped.
@@ -82,13 +91,13 @@ Several free-text blobs pack `Tel:`/`Fax:`/`Email:`/`Web:`/`Contact:` labels bac
 | 1 | 97 | 34 pension plans + 14 motor/general insurers + 7 long-term insurers + 16 agents + 12 brokers/adjusters/underwriters + 2 international insurers + 2 international intermediaries + 10 insurance companies with registered sales representatives |
 | 2 | 42 | union of 6 mutual-fund tables; all `Status=Active` |
 | 3 | 4 | 2 active international banks + 2 under liquidation (a 3rd liquidation row was a blank spacer `<tr>` and correctly dropped) |
-| 4 | 15 | all headings under "Currently Registered Agents/Trustees/Service Providers:", stopping before the footer "Quick Links"/"Useful Links" |
+| 4 | 15 | all headings under "Currently Registered Agents/Trustees/Service Providers:", stopping before the footer "Quick Links"/"Useful Links"; all 15 now carry a parsed contact block |
 | 5 | 4 | credit unions |
 | 6 | 1 | single building society |
 | 7 | 13 | 8 + 5 names flattened from the two-column table |
 | 8 | 4 | microfinancing institutions only, per Jira scope (Money Remitter agent tables excluded) |
 
-**Non-empty rates**: `Name`/`Cntry` 100% (180/180). `Address_1` 13/180, `Phone` 14/180, `Email` 15/180 — populated only for ListNr 3 (Address_1 2/4 — the 2 banks under liquidation have no street address published, only a liquidator contact; Phone 3/4; Email 4/4) and ListNr 4 (11/15 — the 3 entities noted above genuinely have no contact block on the page). This is a real reflection of the source: lists 1, 2, 5, 6, 7, 8 are simple name-only registries with no address/phone/email published anywhere on their pages.
+**Non-empty rates** (v2): `Name`/`Cntry`/`License_Type`/`RegulationType`/`ListLanguage`/`ListProcessDate` 100% (180/180). `Address_1` 17/180, `City` 17/180, `Phone` 18/180, `Email` 19/180, `Fax` 11/180, `Website` 9/180, `Zip` 2/180 — populated only for ListNr 3 (Address_1 2/4 — the 2 banks under liquidation have no street address published, only a liquidator contact; Phone 3/4; Email 4/4) and ListNr 4 (**15/15** in v2, was 11/15 in v1). This is a real reflection of the source: lists 1, 2, 5, 6, 7, 8 are simple name-only registries with no address/phone/email published anywhere on their pages.
 
 **Encoding check**: regex `Ã©|â€™|Â |Ã¯|\?{3,}` — clean, no hits.
 

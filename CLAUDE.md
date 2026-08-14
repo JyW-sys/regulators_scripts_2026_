@@ -25,7 +25,7 @@ sqldict={'bvdid': [], 'priority': [], 'ListLabel': [], 'Typology': [], 'EntryTyp
 
 ## Layout
 
-- `Template/` — starting notebooks for new regulators (`TEMPLATE_Regulator_scraping.ipynb`, `TEMPLATE_web_scaping.ipynb`, `PDF-Scraping-Regulators-Notebook.ipynb`). Do not edit; copy into a new agency folder.
+- `Template/` — starting notebooks for new regulators. Do not edit; copy into a new agency folder.
 - use global Python environment
 
 

@@ -10,48 +10,86 @@
 
 ## Script
 
-- **Current Version**: `SR_CBSU_v1.py`
-- **Approach**: `requests` + `BeautifulSoup` (no browser needed) to read the
-  landing page and discover one PDF link per list, then download each PDF into
-  `tempfolder/` and parse it. `verify=False` for the corporate TLS proxy.
-- **PDF parsing**: `pdfplumber` first; `camelot` (flavor='stream') / `tabula`
-  as fallback. All four PDFs are pure scanned images (no text layer), so parsing
-  actually runs through **OCR**.
-- **OCR engines**:
-  1. **Tesseract** (`pytesseract`) — preferred; used automatically when a working
-     `tesseract` binary is found (the Windows production box, bundled
-     `Tesseract-OCR/` + `tessdata/` at the repo root). Pages are rendered to
-     images with the bundled **poppler** (`pdf2image.convert_from_path`,
-     `poppler-25.12.0/Library/bin`), with `pypdf` `page.images` only as a
-     fallback — `page.images` returns `[]` for these JPEG scans on the Py3.8
-     box's older pypdf, which is what previously produced an empty output.
-     `tesseract_available()` probes `get_tesseract_version()` (not just
-     file-exists) so the bundled Windows `.exe`, which is present but not
-     executable on the Mac, does not block the RapidOCR fallback.
-  2. **RapidOCR** (`rapidocr-onnxruntime`, PP-OCR / onnxruntime) — pure-Python
-     fallback that ships its own models and needs no system binary, so it runs
-     on the corporate Mac where tesseract cannot be installed. The current
-     output was produced with this engine. `pip install rapidocr-onnxruntime onnxruntime`.
-  Both engines return **positioned OCR boxes** `(page, y, x, text)` via
-  `ocr_boxes()` (row-merged within `ytol=22` px, but *not* forced onto one
-  `1.  NAME` text line) — entities are then segmented by the box **geometry**
-  of the item-number anchors (`parse_entities_geometric`), not by same-line
-  text reconstruction; see PDF structure below. OCR text is NFKC-normalised to
-  fold fullwidth punctuation (e.g. `，`) back to ASCII.
+- **Current Version**: `SR_CBSU_v2.py` (supersedes `SR_CBSU_v1.py`)
+- **Approach**: `requests` + `BeautifulSoup` to read the landing page and
+  discover one PDF link per list, download each PDF into `tempfolder/`, then
+  **OCR** it. `verify=False` for the corporate TLS proxy.
+- All four PDFs are **pure scanned images** — `pdfplumber` / `pypdf` report
+  **zero text characters**. There is no text layer to extract; OCR is mandatory,
+  not a fallback. `pdfplumber` / `camelot` / `tabula` are therefore not used.
+
+### Why v2 exists
+
+v1 OCR'd correctly at the *character* level but reconstructed lines wrongly,
+producing merged words (`SURINAAMSEPOSTSPAARBANK`,
+`REPUBLIC BANK (SURINAME)N.V.`), dropped entities, and a single flat
+`RegulationType = Regulated` for every row. v2 keeps the OCR engine choice and
+replaces the **reconstruction and parsing** layer.
+
+### v2 OCR pipeline (`ocr_page`)
+
+The documents are letter-spaced monospace typewriter scans. RapidOCR's
+recogniser drops intra-box spaces on that font, which is what merged the words.
+v2 never asks the recogniser to read a whole line:
+
+1. **Page image** via `pypdf` `page.images[0].data` — no poppler needed on the Mac.
+2. **Pitch estimation** — measure the character pitch of the monospace font.
+3. **Line segmentation by pixel ink projection** (`ink.sum(axis=1)`), not by
+   detector boxes. This fixed the detector-recall gaps that lost list 3 entry 5's
+   name and several item numbers. Bands closer than `0.30 × pitch` are re-merged
+   so accents and quote marks re-attach to their own line.
+4. **Word segmentation** by horizontal ink runs within each line band.
+5. **Per-word crop re-recognition** — each word crop is fed back with
+   `use_det=False, use_cls=False, use_rec=True`. Word breaks are then guaranteed
+   by construction rather than inferred.
+6. **Geometric column placement** — each word is placed at
+   `col = round(x / pitch)`, preserving the indentation that distinguishes a
+   numbered name line from its indented address lines. A word is never fused to
+   its predecessor (`elif text and not text.endswith(' '): text += ' '`).
+7. **Normalisation** — NFKC plus explicit fullwidth/ideographic punctuation
+   mapping (`。`→`.`, `，`→`,`, `’`→`'`).
+
+**OCR cache**: results are cached to `_debug/list{1..4}_lines.json` (~1 min/page
+otherwise). Set `SR_CBSU_REOCR=1` to force a fresh OCR pass.
+
+### v2 parsing
+
+- **`ENTRY` is tested before `NOISE`** — deliberate. One pension fund is
+  literally named `STICHTING PENSIOENFONDS VAN DE CENTRALE BANK VAN SURINAME`;
+  a letterhead substring filter applied first deleted it (real data loss in v1).
+- **`TITLE` is anchored and matched loosely** (`^\W*B\s*E\s*K\s*E\s*N\s*D...`).
+  It must NOT be a loose `BEKEND` search — that also matches the ordinary word
+  *"bekend,"* in the preamble sentence, which is the line carrying the
+  `ListValidityDate`. That bug left `ListValidityDate` empty on all rows in v1.
+  The date is now extracted **before** any filtering.
+- **`ROMAN_SECTION` + `looks_like_section()`** run regardless of whether an entry
+  is open, flushing the current entry. In v1 section detection only ran when no
+  entry was open, so all 40 list-1 rows inherited the first heading
+  (`PRIMAIRE BANKEN`).
+- **`SIGNOFF`** regex + an `in_signature` skip flag stop the signature block
+  (`Paramaribo, 29 januari 2020`, `F. Hausil`, `Deputy Governor …`) leaking into
+  `Address_2`. The flag resets when a genuine numbered entry appears.
+- **`is_address()`** discriminates a wrapped company-name line from a real
+  address line. An address is either an explicit `p/a` (c/o) line, a line naming
+  one of the ten districts, or a mixed-case line carrying a house number.
+  Wrapped name lines are ALL CAPS (`BEDRIJVEN N.V.`) or start with a legal form
+  (`G.A., …`, `C-47 G.A. (C-47 Coop)`), so they fail all three tests.
+- **`finish_entry()`** does a look-ahead split: everything before the first
+  `is_address()` line is name continuation, everything after is address.
 
 ## List Types
 
 The landing page (`.../suriname-financial-institutions/financial-institutions`)
-has four "Click here for the &lt;ListName&gt;" paragraphs; the "here" link on each
-points to one PDF (under `/images/content/publicaties/DTK_2020/`, Dutch file
-names).
+has four "Click here for the &lt;ListName&gt;" paragraphs. All four anchors'
+visible text is just the word **"here"**, so link discovery matches on the href
+instead: `'dtk_2020' in href.lower() and meta['slug'] in href.lower()`.
 
-| ListNr | ListName | ListLabel | PDF (discovered) |
-|--------|----------|-----------|------------------|
-| 1 | Other Depository Corporations | 1 | Overzicht-van-ondertoezichtstaande-kredietinstellingen.pdf |
-| 2 | Insurance Companies | 2 | Overzicht-van-ondertoezichtstaande-verzekeringsmaatschappijen.pdf |
-| 3 | Pension- and Provident funds | 4 | Overzicht-van-ondertoezicht-staande-pensioen--en-voorzieningsfondsen.pdf |
-| 4 | Money Exchange and Money Transfer Houses | 4 | Overzicht-van-ondertoezichtstaande-GTKs.pdf |
+| ListNr | ListName | ListLabel | slug |
+|--------|----------|-----------|------|
+| 1 | Other Depository Corporations | 1 | `kredietinstellingen` |
+| 2 | Insurance Companies | 2 | `verzekeringsmaatschappijen` |
+| 3 | Pension- and Provident funds | 4 | `pensioen` |
+| 4 | Money Exchange and Money Transfer Houses | 4 | `gtks` |
 
 Base path: `https://www.cbvs.sr/images/content/publicaties/DTK_2020/`
 
@@ -63,180 +101,107 @@ depository corporations/banks → `1`; list 2 is insurance → `2`; lists 3 (pen
 
 Each list is a scanned "BEKENDMAKING" (announcement) issued by the Centrale Bank
 van Suriname, **per 31 December 2019**, in **Dutch**. Layout is a numbered list
-grouped under section headings, e.g. for list 1: `I. PRIMAIRE BANKEN`,
-`II. SPAAR- EN KREDIETCOOPERATIES`. Each entry is:
+grouped under section headings. A single PDF holds **several independent 1..N
+sequences**, one per section heading:
 
 ```
+I.  PRIMAIRE BANKEN
 1.  ENTITY NAME N.V.
     Street 1, Paramaribo
 ```
 
-A single PDF holds **several independent 1..N sequences**, one per section
-heading (e.g. list 1 has 5 runs: `I. PRIMAIRE BANKEN` 1-10, `II. SPAAR- EN
-KREDIETCOOPERATIES` 1-19, a "niet meer operationeel" sub-list 1-4, `SPAARFONDSEN`
-1, `IV. BELEGGINGS- EN FINANCIERINGSMAATSCHAPPIJEN` 1-6).
-
-The numbered line → **Name**, the following indented line(s) → **Address_1** /
-**City** (token after the last comma), with `Tel:`/`Email` pulled out by regex
-if present.
-
-**Geometric segmentation (`parse_entities_geometric`)** — entities are
-segmented by the OCR box **position** of item-number anchors, not by requiring
-the number and name to land on one reconstructed text line. This fixes the
-main failure mode of a same-line-merge parser: when OCR places the number box
-far from the name box, or drops the number entirely, the name/address used to
-get silently folded into the *previous* entity. Key mechanisms:
-- **Preamble gate** — entities are only collected after the intro sentence that
-  ends with `:` (`... staan ingeschreven:`). This drops the boilerplate intro,
-  including list 4's `4 van de Wet ...` that would otherwise look like item 4.
-- **Bare-anchor recovery** — a lone number box with no name merged onto it
-  (`^\d{1,3}[.)]?$`, left of `ANCHOR_X_MAX`) still opens a new entity; its name
-  is filled in from the following content row(s) instead of the digit being
-  discarded as noise.
-- **Dropped-anchor recovery** — an ALL-CAPS row that looks like a new entity
-  name (ends in a legal suffix `N.V.`/`G.A.`, or — once ruled out as a genuine
-  section header by forward lookahead — any header-shaped ALL-CAPS row) starts
-  a new entity even when its own number box was never OCR'd at all. The
-  lookahead resolves the genuine ambiguity between "a section header" and "an
-  unnumbered entity's name that merely looks header-shaped" by checking what
-  comes next: a numbered anchor confirms a real header; address-shaped content
-  (a comma, or non-upper text) with no number first confirms it's really a name.
-- **Noise/stop filtering** — the repeated page footer (`Telefoon ... Telefax`),
-  the closing text (`Hierin niet genoemde ...`), the signature block (`Deputy
-  Governor`, official names) and the `Houdstermaatschappij` holding-company line
-  are skipped, so they no longer pollute the last entity's Address/City.
-- **City parenthetical** — a trailing status note in parentheses
-  (`(Ingetrokken ...)`, `(respondeert niet, ...)`) is ignored when picking City;
-  the note stays inside Address_1.
+10 sections across the 4 PDFs. Some carry status information in the heading
+itself (`... DIE NIET MEER OPERATIONEEL ZIJN:`), some inline per entry
+(`(Ingetrokken d.d. 29 januari 2020)`, `in proces van ontbinding`).
 
 ## Field mapping
 
 | sqldict field | Source / value |
 |---------------|----------------|
-| Name | numbered entry line ("N. NAME") |
-| Address_1 | address line(s) following the name |
-| City | token after the last comma in the address (e.g. Paramaribo) |
+| Name | numbered entry line + any wrapped continuation lines |
+| Address_1 | address line(s) after the name/address split |
+| City | district token from the district-bearing address line (addresses wrap; the district is usually last) |
+| CoType | the section heading the entry falls under |
 | Phone / Email | regex-parsed from the address block if present |
 | Cntry | `SR` |
-| RegulationType | `Regulated` |
+| RegulationType | see branching below |
+| CancellationDate | the `Ingetrokken d.d. …` date, when present |
+| ListValidityDate | `2019-12-31` (parsed from the preamble sentence) |
 | ListName | exact ListName above |
 | ListLabel | per table above (1 / 2 / 4) |
-| ListLanguage | `EN` (per ticket spec; source documents are in Dutch — see QA) |
+| ListLanguage | `NL` — **changed from v1's `EN`**; the source documents are Dutch |
 | RegCtry / RegCode / ListCode | SR / CBSU / ListNr (1–4) |
 | ListProcessDate | run date (`%Y-%m-%d`) |
 
+### RegulationType branching (v2)
+
+```python
+if e['cancel']:                                              # "(Ingetrokken d.d. ...)"
+    RegulationType = 'Withdrawn';      CancellationDate = e['cancel']
+elif re.search(r'NIET\s+MEER\s+OPERATIONEEL', e['section'], re.I):
+    RegulationType = 'Not Operational'
+elif e['status']:                                            # "in proces van ontbinding"
+    RegulationType = 'In Liquidation'
+else:
+    RegulationType = 'Regulated'
+```
+
 ## Status / QA
 
-- **UNBLOCKED — 120 rows extracted via OCR** (previously blocked for lack of an
-  OCR engine on the Mac; a prior same-line-merge parser was recovering 115).
-  All four PDFs are pure scanned images (one full-page A4 image at ~300 DPI per
-  page, DeviceRGB, **zero text layer**), confirmed with `pdfplumber` / `pypdf`
-  (0 characters). They were OCR'd with **RapidOCR** (pure-Python, no system
-  binary) and segmented with the geometric parser (see PDF structure above).
+- **Current output**: `SR CBSU SQL Ready 2026-08-05 16.58.29.xlsx`, fixed
+  43-column schema.
+- **130 rows / 130 distinct names** (v1: 120).
 
-  | ListNr | ListName | Entities found | Named (saved to xlsx) | Blank name |
-  |--------|----------|-----------------|------------------------|------------|
-  | 1 | Other Depository Corporations | 40 | 39 | 1 |
-  | 2 | Insurance Companies | 12 | 11 | 1 |
-  | 3 | Pension- and Provident funds | 44 | 39 | 5 |
-  | 4 | Money Exchange and Money Transfer Houses | 31 | 31 | 0 |
-  | | **Total** | **127** | **120** | **7** |
+  | ListNr | ListName | v1 rows | v2 rows |
+  |--------|----------|---------|---------|
+  | 1 | Other Depository Corporations | 39 | 40 |
+  | 2 | Insurance Companies | 11 | 13 |
+  | 3 | Pension- and Provident funds | 39 | 45 |
+  | 4 | Money Exchange and Money Transfer Houses | 31 | 32 |
+  | | **Total** | **120** | **130** |
 
-  Counts above are from the geometric parser run offline against the cached
-  OCR box dumps (`_debug/list{1..4}_boxes.txt`) — the source `cbvs.sr` site is
-  returning a `521` (origin server down, confirmed independently via two
-  fetch paths) as of this update, blocking a fresh live end-to-end run. Re-run
-  `SR_CBSU_v1.py` once the site is back up to confirm these counts against a
-  live scrape before treating them as final.
+- **Completeness**: `Name`, `Address_1`, `City`, `CoType`, `ListValidityDate` are
+  **130/130 non-empty**. `ListValidityDate` = `2019-12-31` on every row.
+- **Numbering integrity**: **zero gaps** in the per-section entry numbering across
+  all 10 sections — i.e. every `1..N` run is complete, which is the strongest
+  available check that no entity was dropped.
+- **RegulationType distribution**: Regulated 117, In Liquidation 7,
+  Not Operational 4, Withdrawn 2. (v1 emitted only `Regulated`.)
+- **Sections recovered that v1 collapsed into the preceding heading**:
+  `SPAAR- EN KREDIETCOOPERATIES DIE NIET MEER OPERATIONEEL ZIJN:` (4 entries),
+  `GELDOVERMAKINGSKANTOREN` (7), `SPAARFONDSEN` (1),
+  `BELEGGINGS- EN FINANCIERINGSMAATSCHAPPIJEN` (6), `VOORZIENINGSFONDSEN` (5).
+- **Spot-checks passed**: the CENTRALE BANK pension fund (the entity v1 deleted
+  as letterhead noise), KOOPERATIEVE CENTRALE, C-47, S.A.A. (In Liquidation),
+  UNIFOREX.
+- **Word-merge defects from v1 are gone** — `SURINAAMSE POSTSPAARBANK`,
+  `SURINAAMSE VOLKSCREDIETBANK` etc. now carry correct word breaks.
 
-- **Current output**: `SR CBSU SQL Ready <timestamp>.xlsx`, fixed 43-column
-  schema, **0 empty names** (rows with a blank name are dropped before saving,
-  same as before), address & (mostly) city populated for every saved row.
+### Known remaining artifact
 
-- **Fixed by the geometric rewrite** (previously lost/merged entities, now
-  recovered as their own row):
-  - List 1: `DE DIREKTE BELASTINGEN G.A.(SPAAR EN KREDIET KOOPERATIE A.D.B.)`
-    and `SURINAAMSE TRUSTMAATSCHAPPIJ N.V.` — both had their leading item
-    number dropped by OCR and were previously glued onto the prior entity.
-  - List 2: entry 11 (still name-blank — OCR never produced a name at all —
-    but now correctly split into its own row instead of its address folding
-    into entry 10's).
-  - List 3: the first `PENSIOENFONDSEN` entry (no number box at all — the
-    run's very first item), plus two further dropped-anchor entries
-    (`STICHTING PENSIOENFONDS ...` / Wageningen and `STICHTING
-    PENSIOENFONDSS.A.A.` / BDo Assurance) and the document's last entity
-    (`STICHTING VOORZIENINGSFONDS VOOR PARTICULIERE WERKNEMERS IN SURINAME`) —
-    none of these three end in `N.V.`/`G.A.`, so they needed the forward-
-    lookahead disambiguation (not just the tail-suffix check) to be recovered.
-  - List 3: a trailing-signature leak fixed — `NOISE_RE`'s `Compliance and
-    Internationa` pattern used literal spaces, but this document's OCR glued
-    the phrase with none (`ComplianceandInternationalAffairs`), so it leaked
-    into the last entity's Address_1. Changed to `Compliance\s*and\s*Internationa`
-    to match the `\s*`-tolerant convention already used one line above for
-    `CENTRALE\s*BANK\s*VAN\s*SURINAME`.
+- One cosmetic OCR misread: `G.A. 1 (de A.V.K.C.)` — the source reads `G.A.,`
+  and OCR rendered the comma as `1`. Single instance, name otherwise correct.
 
-- **This is a first-pass OCR extraction — names and City still need review.**
-  The counts and entity coverage are reliable, but OCR of these scans leaves
-  noise that a human (or a cleaner Windows/Tesseract run) should verify:
-  - **Name spacing (primary field!)**: RapidOCR occasionally drops the spaces
-    inside tightly-kerned all-caps names, e.g. `SURINAAMSEPOSTSPAARBANK`,
-    `KOOPERATIEVECENTRALEVANKREDIETKOOPERATIES`. The characters are right; the
-    word breaks are missing. ~15–20 names (mostly the long cooperative /
-    pension-fund names in lists 1 & 3) are affected.
-  - **Wrapped names**: names that wrap to a second line are captured only up to
-    the first line; the continuation is folded into Address_1. Also affects the
-    accented spellings (`KOÖPERATIEVE`) rendered without the diaeresis.
-  - **List 3, one cosmetic name artifact**: the `PENSIOENFONDSEN` sub-heading
-    directly preceding the "niet meer operationeel" run's first entity is
-    genuinely indistinguishable, on text shape/position alone, from that
-    entry's own name (both are a short ALL-CAPS line followed eventually by an
-    address with no number in between) — so the header text ends up as a
-    spurious one-word prefix on that entity's name
-    (`PENSIOENFONDSEN STICHTINGPENSIOENFONDS"A"...`) instead of being dropped
-    cleanly. Address and entity count are unaffected; only that one name has
-    the extra leading word. Judged not worth further heuristics for a single
-    instance — flagging here rather than fixing silently.
-  - **Remaining accepted limitations** (name/address never correctly read or
-    paired by RapidOCR — engine limits, not geometric-segmentation bugs; a
-    Tesseract/Windows run may recover some):
-    - List 1: one entry (`KOOPERATIEVECENTRALEVANKREDIETKOOPERATIES`'s run) has
-      its name and address swapped with the next entry's — an OCR box
-      y-position jitter placed the address box *above* its own name box on the
-      page, so the address gets attached to a blank-name entity and the name
-      gets attached to the following entity's address instead. Confirmed
-      pre-existing (unaffected by this round's fixes); a different root cause
-      (box y-jitter, not anchor segmentation) from everything else on this list.
-    - List 2: entry 11's name was never OCR'd (11 of 12 numbered insurers have
-      a name; holding company excluded as before).
-    - List 3: 5 entries have no name at all in the scan — bare number anchors
-      (`9.`, `13.`, `21.` in the main run; `2.`, `8.` in the "niet meer
-      operationeel" sub-list) directly followed by an address with no name row
-      ever appearing in between.
-    - List 4: `N.V. Dallex` is still merged into `CYRILL'S EXCHANGE` — its `4.`
-      was never OCR'd, and unlike the other dropped-anchor recoveries above,
-      `N.V.Dallex` has the legal suffix as a *prefix*, not a tail, so
-      `NAME_TAIL_RE` can't catch it; it also fails the ALL-CAPS check outright
-      (OCR rendered it `N.V.Dallex`, with a lowercase tail), so it never even
-      reaches the header/name disambiguation. Same limitation as before.
-  - **Regulatory status in the source (per-case decision needed)**: several
-    entries carry Dutch status notes now preserved in Address_1 —
-    `Ingetrokken d.d. 29 januari 2020` (**licence withdrawn**: list 4 EURO
-    EXCHANGE, CARIBBEAN MONEYMASTERS), `in proces van ontbinding` / `gerechtelijk
-    proces tot ontbinding` (**in dissolution**), `respondeert niet` (not
-    responding). All rows are currently `RegulationType = Regulated`; confirm
-    whether the withdrawn/dissolving ones should instead be `Cancelled` (with
-    `CancellationDate`).
-- **For the cleanest result, re-run on the Windows production box** (Tesseract +
-  tessdata installed). The script **auto-prefers tesseract** when its binary is
-  present, so no code change is needed there; Tesseract generally preserves word
-  spacing better than PP-OCR on printed Latin text. Compare to the
-  `LC FSRALC` / `GN BCRG` img2table+TesseractOCR pattern if table-structured OCR
-  gives cleaner rows.
-- **QA — also confirm**:
-  - **Language**: source PDFs are Dutch; `ListLanguage` is set to `EN` per the
-    ticket's English list names. Confirm whether BVD wants `NL` or a translation.
-  - **Section headings as CoType**: headings such as `PRIMAIRE BANKEN`,
-    `SPAAR- EN KREDIETCOOPERATIES`, `VERZEKERINGSINSTELLINGEN` are currently not
-    captured into `CoType`; add if BVD wants the sub-category.
-  - **Data vintage**: the published lists are dated **31 Dec 2019**; flag if a
-    more recent list is required.
+### Items needing your confirmation
+
+1. **`ListLanguage` changed `EN` → `NL`.** The source documents are Dutch; only
+   the ticket's list *titles* are English. Revert if BVD expects `EN`.
+2. **New `RegulationType` values** — `Withdrawn`, `Not Operational`,
+   `In Liquidation`. CLAUDE.md says non-`Regulated` cases are decided case by
+   case, so confirm these three strings are the ones BVD wants (and that
+   `Withdrawn` is preferred over `Cancelled`).
+3. **Data vintage**: the published lists are dated **31 Dec 2019**. Flag if a
+   more recent list is required — the regulator has not republished since.
+4. **`CoType` now carries the section heading** (`PRIMAIRE BANKEN`,
+   `SPAAR- EN KREDIETCOOPERATIES`, `VERZEKERINGSINSTELLINGEN`, …). v1 left it
+   empty. Confirm this is the wanted sub-category field.
+
+### Environment notes
+
+- OCR uses **`rapidocr-onnxruntime`** (pure Python, ships its own models, no
+  system binary) — required because tesseract cannot be installed on the
+  corporate Mac. `pip install rapidocr-onnxruntime onnxruntime`.
+- Page images come from `pypdf` `page.images`, avoiding a poppler dependency.
+  On the **Windows production box**, poppler and Tesseract are both available;
+  a Tesseract run may be worth comparing, but v2's per-word crop recognition has
+  already removed the word-spacing defect that motivated preferring Tesseract.

@@ -107,28 +107,36 @@ python "IT CONSOB/IT_CONSOB_v2.py"
 
 Output `IT CONSOB SQL Ready <timestamp>.xlsx` is written to **this folder** (gitignored).
 
-### Captcha: solve it by hand
+### Captcha: solve it by hand (the run resumes by itself)
 
-The most reliable way past Radware is to **click the captcha yourself** — no bypass needed. Run the
-script from a real terminal and it auto-enables manual mode: when Radware appears it maximises and
-focuses the Chrome window, prints instructions, and **waits for you to press Enter**. Solve the tiles,
-wait for the CONSOB page, press Enter, and the run continues from where it paused.
+The most reliable way past Radware is to **click the captcha yourself** — no bypass needed. When a
+challenge appears the script maximises and focuses the Chrome window, beeps, posts a macOS
+notification, and then **polls the live page until the challenge is gone**. Click the tiles and the
+run picks up within ~2 seconds. **There is nothing to type.**
+
+Detecting the solve from the browser rather than from the keyboard is deliberate. An earlier revision
+blocked on `input()`, which only works when stdin is a real terminal; launched from a wrapper, an IDE
+or a scheduler it raised `EOFError` immediately and the manual path was silently skipped in favour of
+timed backoff. Polling has no such dependency. (Pressing Enter still works as an override when stdin
+*is* a terminal, and `s` turns manual mode off for the rest of the run.)
 
 Because the clearance cookie is stored in `dp_profile_v2/`, this is normally a **one-time step for the
 whole run** — often for several days, since the profile survives between runs.
 
-At the prompt you can type `s` to stop being asked; the run then falls back to timed backoff.
+A **warm-up load** runs before list 1 so any challenge fires at the start, while someone is still
+watching, instead of 20 minutes into list 7's A–Z loop.
 
-Mode is auto-detected from the terminal (`sys.stdin.isatty()`), so the same file still works
-unattended in the Control Room — there it uses timed backoff instead of hanging on a prompt nobody
-can answer. Override either way:
+Manual mode is **on by default**. Unattended runs degrade safely: the first challenge nobody solves
+within `CONSOB_MANUAL_WAIT` flips manual mode off for the rest of the run, so the worst case is one
+wasted wait window, not one per page.
 
 ```bash
-CONSOB_INTERACTIVE=1 python "IT CONSOB/IT_CONSOB_v2.py"   # always ask me
-CONSOB_INTERACTIVE=0 python "IT CONSOB/IT_CONSOB_v2.py"   # never ask (unattended)
+CONSOB_MANUAL_WAIT=900 python "IT CONSOB/IT_CONSOB_v2.py"  # wait 15 min per challenge (default 300)
+CONSOB_INTERACTIVE=0   python "IT CONSOB/IT_CONSOB_v2.py"  # never wait for a human (Control Room)
 ```
 
-The startup banner prints which mode is active.
+The startup banner prints which mode is active. stdout is line-buffered so the captcha banner shows
+up immediately when the run is watched through a log file.
 
 Operational notes:
 - **Do not run headless and do not use incognito.** Headless is far more detectable to Radware, and
@@ -138,24 +146,48 @@ Operational notes:
   needs tens of minutes to cool down.
 - Expect roughly 8 s per rendered page, plus 2–5 s pacing between list 7's 26 letters.
 
-## Status — not yet run end to end
+## Status — first full end-to-end run: 2026-08-06 ✅
 
-**No output file has been produced.** The scraper is code-complete and its parsers are unit-tested,
-but every live run attempt on 2026-07-29 was stopped by the Radware wall described above. What is
-verified: compiles clean, 43-column schema with equal-length columns, address mapping correct on
-both real label shapes, block detection working against a live block page, and the page-load
-timeout fix. What is **not** verified: the actual row counts for lists 1–7.
+**737 rows**, 43 columns, written to `IT CONSOB SQL Ready 2026-08-06 14.09.46.xlsx`.
 
-To finish it, on a machine whose network is not flagged:
+| ListCode | Rows |
+|---|---|
+| IT CONSOB 1 | 1 |
+| IT CONSOB 2 | 5 |
+| IT CONSOB 3 | 5 |
+| IT CONSOB 4 | 77 |
+| IT CONSOB 5 | 58 |
+| IT CONSOB 6 | 46 |
+| IT CONSOB 7 | 545 |
+| IT CONSOB 8 | — (404 upstream, skipped with a warning) |
 
-```bash
-python "IT CONSOB/IT_CONSOB_v2.py"
-```
+One captcha for the whole run, at list 7 letter `N`; solved by hand, auto-detected, run continued.
+Lists 1–6 and letters A–M needed none.
 
-Run it from a real terminal so `INTERACTIVE` auto-detects on. Solve the one hCaptcha by hand when it
-appears; clearance lands in `dp_profile_v2/` and the rest of the run should sail past. Two things to
-check in that first run: **list 1** previously rendered only 1 entity (plausible, but confirm against
-the Italian site), and **list 8** will be skipped with a warning until a replacement URL arrives.
+List 7 by letter: A 52, B 75, C 49, D 17, E 30, F 22, G 33, H 1, I 39, J 1, K 2, L 15, M 35, N 12,
+O 10, P 30, Q 0, R 22, S 48, T 27, U 10, V 7, W 3, X 0, Y 1, Z 4.
+
+Verified after the run:
+
+- **`Q` = 0 and `X` = 0 are genuine, not soft-blocks.** Re-loaded live: both render a full page
+  (280k / 282k chars) with `blocked = False` and zero `div.boxQuotata`, against an `R` control that
+  returned 22 — matching the scrape. This check matters because a Radware soft-block returns HTTP 200
+  with the right `<title>` and no content, which is indistinguishable from a real empty letter.
+- **List 1 really is a single entity** — confirming the count from the earlier partial run.
+- **9 duplicate `Name`+`ListCode` pairs in list 7 are on the site** (e.g. `EDISON SPA` ×3,
+  `TELECOM ITALIA SPA` ×2), some carrying a `codConsob` and some not. **Left in deliberately** — the
+  output row count must match the site.
+- Every row has `Name`, `ListLabel` (all 4), `RegulationType`, `RegCtry`, `RegCode`, `ListName`,
+  `ListLanguage` and `ListProcessDate` populated; no blank `Name`.
+
+### Open items
+
+1. **List 8 needs a replacement URL from the ticket owner** — `mtf-authorised-consob` is still 404.
+2. **`Name - Mother Company` is empty on all 737 rows** while `Address_1 / City / Zip / Cntry -
+   Mother company` are filled on the 52 branch records. On these lists the Italian branch and the
+   foreign parent are the same legal entity, so the parent's name is the row's own `Name`. Confirm
+   with the ticket owner whether to mirror `Name` into `Name - Mother Company` on those 52 rows or
+   leave it blank.
 
 ## History
 

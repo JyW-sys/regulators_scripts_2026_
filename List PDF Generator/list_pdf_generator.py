@@ -3,8 +3,9 @@
 # List PDF Generator
 #
 # Standalone utility. Drop one or more "SQL Ready" .xlsx workbooks in THIS folder
-# and run the script; it writes one PDF per (RegCtry, ListCode) pair into
-# ./pdf_output/. Each PDF is a one-column dump of the entities' Name values
+# and run the script; it writes one PDF per (RegCtry, RegCode, ListCode) into
+# ./pdf_output/, named "RegCtry RegCode SQL Ready <date-time from the file's own
+# name>- ListCode.pdf". Each PDF is a one-column dump of the entities' Name values
 # (32 names per page, header line "Name").
 #
 # Helpers (safe_filename / draw_header / export_list_to_pdf) extracted from
@@ -45,6 +46,17 @@ if FONT_NAME == 'Helvetica':
 def safe_filename(name):
     name = str(name).strip()
     return re.sub(r'[\\/:*?"<>|]+', '_', name) or "UNKNOWN"
+
+
+# Matches "... SQL Ready <anything>" and captures the <anything> -- the workbook's
+# own filename carries its date/time after "SQL Ready ", e.g.
+# "XX BCEAO SQL Ready 2026-07-10 12.32.59.xlsx" -> "2026-07-10 12.32.59".
+SQL_READY_DATETIME_RE = re.compile(r'SQL Ready\s+(.+)$', re.IGNORECASE)
+
+
+def extract_source_datetime(base_name):
+    m = SQL_READY_DATETIME_RE.search(base_name)
+    return m.group(1).strip() if m else None
 
 
 def draw_header(c, y):
@@ -88,21 +100,33 @@ if not xlsx_files:
 for xlsx in xlsx_files:
     filename = os.path.basename(xlsx)
     df_pdf = pd.read_excel(xlsx)
-    missing = [col for col in ('Name', 'RegCtry', 'ListCode') if col not in df_pdf.columns]
+    missing = [col for col in ('Name', 'RegCtry', 'RegCode', 'ListCode') if col not in df_pdf.columns]
     if missing:
         print(f"[SKIP] {filename}: missing column(s) {missing}")
         continue
 
     base_name = os.path.splitext(filename)[0]
+    source_datetime = extract_source_datetime(base_name)
+    if source_datetime is None:
+        print(f'[SKIP] {filename}: filename must contain "SQL Ready <date-time>"')
+        continue
+
     made = 0
-    # One PDF per unique (RegCtry, ListCode) pair: e.g. "...- CW-1.pdf", "...- SX-1.pdf".
-    for (regctry, list_code), group in df_pdf.groupby(['RegCtry', 'ListCode'], dropna=False):
+    # One PDF per (RegCtry, RegCode, ListCode), named
+    # "RegCtry RegCode SQL Ready <date-time>- ListCode.pdf".
+    for (regctry, regcode, list_code), group in df_pdf.groupby(
+        ['RegCtry', 'RegCode', 'ListCode'], dropna=False
+    ):
         items = group['Name'].dropna().astype(str).tolist()
         if not items:
             continue
         regctry_safe = safe_filename(regctry)
+        regcode_safe = safe_filename(regcode)
         list_code_safe = safe_filename(list_code)
-        pdf_path = os.path.join(outfolder, f"{base_name} - {regctry_safe}-{list_code_safe}.pdf")
+        pdf_filename = (
+            f"{regctry_safe} {regcode_safe} SQL Ready {source_datetime}- {list_code_safe}.pdf"
+        )
+        pdf_path = os.path.join(outfolder, pdf_filename)
         export_list_to_pdf(items, pdf_path)
         made += 1
         print(f"[INFO] wrote {len(items)} names -> {os.path.relpath(pdf_path, scriptfolder)}")

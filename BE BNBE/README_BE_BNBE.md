@@ -32,7 +32,7 @@ to write the workbook if any list disagrees — see *Count audit* below.
 | 17 | EEA e-money institutions with a branch in Belgium | 4 | 2 | 2 |
 | 18 | EEA e-money institutions — freedom to provide services | 4 | 268 | 268 |
 | 20 | US reinsurers operating without a Belgian establishment | 2 | 11 | 11 |
-| 21 | Insurers with full / systematic reinsurance conventions | 2 | 11 | 11 ⚠ |
+| 21 | Insurers with full / systematic reinsurance conventions | 2 | 22 | 22 |
 | 22 | Central securities depositories authorised in Belgium | 4 | 2 | 2 |
 | 23 | Institutions holding dematerialised securities accounts for third parties | 4 | 26 | 26 |
 | 24 | Account keepers for dematerialised securities (Companies Code) | 4 | 37 | 37 |
@@ -136,28 +136,36 @@ DECD-6465 gives `https://www.nbb.be/doc/be/be/protocol/current_codes.xls`. That 
 `full_list_current.xlsx`, which is what the download link on the landing page now points to.
 This is a deliberate deviation from the ticket text. **The ticket should be corrected.**
 
-## ⚠ ListCode 21 duplicates ListCode 20 — by instruction
+## ✔ ListCode 21 — URL corrected (v5.1, 2026-07-31)
 
-DECD-6465's URL cell for list 21 is **identical to list 20's**
-(`.../entreprises-dassurance-ou-de-28`). v5 follows the ticket literally, so lists 20 and 21
-now contain **the same 11 US reinsurers**.
+**Resolved.** The duplicate-of-list-20 problem flagged below is fixed.
 
-The two Jira cells for list 21 contradict each other:
+DECD-6465's *description table* gave list 21 the same URL as list 20
+(`.../entreprises-dassurance-ou-de-28`), so lists 20 and 21 both returned **the same 11 US
+reinsurers** — the ListName and the URL cell contradicted each other. Martha Johnson
+Escorcia's ticket comment of **2026-07-30** supplies the correct page:
 
-| Jira cell | Value | Points at |
-|---|---|---|
-| ListName | *"Entreprises d'assurance inscrites ayant conclu une convention comportant la réassurance intégrale et systématique…"* | `.../entreprises-dassurance-ou-de-2` — a live page with **22** entities, titled word-for-word that ListName |
-| URL | `.../entreprises-dassurance-ou-de-28` | the list-20 page, **11** US reinsurers |
+```
+https://www.nbb.be/fr/activites/supervision-financiere-et-resolution/controle-des-etablissements-financiers/entreprises-7
+```
 
-v4 used `-ou-de-2` (22 rows, content matching the ListName). v5 uses `-ou-de-28` as the
-ticket specifies. The ListName is kept verbatim from Jira, so **ListCode 21's ListName no
-longer describes its contents**.
+That page is titled word-for-word with list 21's ListName and publishes
+*Nombre total d'établissements : 22*. v5.1 scrapes **22/22**, so ListName and contents now
+agree and list 21 is no longer a copy of list 20.
 
-**This needs a decision from the ticket owner.** If the URL cell was a copy-paste slip, change
-list 21's URL back to `.../entreprises-dassurance-ou-de-2` and it returns to 22 rows. Note
-that `-de-2` is also a `<table>`-shaped page vs `-de-28`'s `<ul>` shape — v5 routes list 21
-through the tbody branch, so reverting the URL also means moving `'BE BNBE 21'` back into the
-`<ul>` branch in the main loop.
+Two changes were needed, both in the notebook:
+
+| Cell | Change |
+|---|---|
+| `Begin_Variable` | `regdict['BE BNBE 21']` → the `.../entreprises-7` URL |
+| `Begin_Main` | `'BE BNBE 21'` moved **back into the `<ul>` branch** (`if reg == 'BE BNBE 2' or 'BE BNBE 21' or 'BE BNBE 22' …`) |
+
+The second change is not optional: `.../entreprises-7` is a `<ul class="List1">` page like
+lists 2/22/23/24/27, whereas `-ou-de-28` is a `<table>` page. Left in the tbody branch the
+corrected URL parses to **0 rows**, and the strict count audit would abort the write.
+
+The ticket's description table still carries the wrong URL — **it should be corrected there
+too**, so the next run from the table alone doesn't regress.
 
 ## Known gaps — NOT fixed in v5
 
@@ -167,7 +175,9 @@ These are outside the defects reported for this round. Flagged, not silently fix
    the passporting lists. ListCode 4 is German banks in Frankfurt, Wiesbaden and Hamburg —
    all currently stamped `BE`. The home member state *is* on the page
    (`Etat membre du siège social : Allemagne`) and drives the per-country grouping, so it is
-   recoverable. Affects lists 4, 7, 8, 12, 14, 15, 17, 18, 20, 21.
+   recoverable. Affects lists 4, 7, 8, 12, 14, 15, 17, 18, 20. (No longer list 21 — since
+   the v5.1 URL fix, all 22 of its entities are Belgian mutual fire insurers, so `BE` is
+   correct there.)
 2. **`City` / `Zip` parsing is positional and misfires on multi-word cities.**
    `Taunusanlage 8, 60329 Frankfurt Am Main` yields `City = "Main"`. `City` is 66 % filled,
    `Zip` 51 %.

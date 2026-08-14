@@ -10,7 +10,7 @@
 
 ## Script
 
-- **Current Version**: `ZM_BZA_v1.py`
+- **Current Version**: `ZM_BZA_v2.py` (supersedes `ZM_BZA_v1.py` — see "v2 corrections" below)
 - **Approach**: the source page (`.../financial-stability/registered-financial-institutions`) is an Angular single-page app (`<app-root>`) — plain `requests` only returns the empty HTML shell. A one-off DrissionPage render (real Chrome) was used during exploration to pass the JS bootstrap and, via `dp.listen`, discover the public JSON API the page itself calls to populate its table and its four "named filter" summary cards:
 
   ```
@@ -42,7 +42,7 @@ The rendered page shows a single institutions table with four clickable "summary
 | `non_bank_financial_institution` | `field_institution_category` == "Liquidated Institutions" | **excluded** (per Jira comment) |
 | `payment_system_institutions` | `field_payment_system_type` (Participants/Businesses/Systems) | ListNr 4 |
 
-Field availability differs cleanly and consistently by `type` (verified empirically across all 215 raw records, no overlap):
+Field availability differs cleanly and consistently by `type` (verified empirically across all 216 raw records, no overlap):
 
 - `banks_and_deposit_non_banks` → `field_city`, `field_postal_address`, `field_telephone`, `field_short_name`
 - `non_bank_financial_institution` → `field_institution_address`, `field_institution_city`, `field_email`, `field_institution_telephone`
@@ -50,7 +50,7 @@ Field availability differs cleanly and consistently by `type` (verified empirica
 
 All text fields arrive as raw Drupal HTML fragments (e.g. `<a href="/taxonomy/term/413">Commercial Banks</a>`, `<p>...</p>`); the scraper strips tags, unescapes HTML entities (`&amp;`, `&nbsp;`), and collapses whitespace.
 
-**Source data-quality quirk**: roughly half (48/91) of the `payment_system_institutions` records have `field_address` populated with a lone `"."` placeholder rather than a real address or being left empty. The scraper detects this pattern and blanks it to an empty string rather than reporting `"."` as a real address — reflected in the Address_1 non-empty rate for ListNr 4 below.
+**Source data-quality quirk**: roughly half (47/89 after duplicate collapse) of the `payment_system_institutions` records have `field_address` populated with a lone `"."` placeholder rather than a real address or being left empty. The scraper detects this pattern and blanks it to an empty string rather than reporting `"."` as a real address — reflected in the Address_1 non-empty rate for ListNr 4 below.
 
 ## Field mapping
 
@@ -59,7 +59,7 @@ All text fields arrive as raw Drupal HTML fragments (e.g. `<a href="/taxonomy/te
 | Name | `title` (institution name, HTML-stripped) |
 | License_Type | List 1/3: `field_commercial_bank_non_bank`; List 2: `field_institution_category`; List 4: `field_payment_system_type` + `field_payment_system_license_s` in parentheses, e.g. `DESIGNATED PAYMENT SYSTEM PARTICIPANTS (CIC, DDACC, ZIPSS/RTGS)` |
 | Address_1 | List 1/3: `field_postal_address`; List 2: `field_institution_address`; List 4: `field_address` (placeholder `"."` values blanked) |
-| City | List 1/3: `field_city`; List 2: `field_institution_city`; List 4: blank (not a separate field on this content type) |
+| City | List 1/3: `field_city`; List 2: `field_institution_city`; List 4: town parsed out of the free-text `field_address` (no separate city field on this content type) |
 | Phone | List 1/3: `field_telephone`; List 2: `field_institution_telephone`; List 4: blank |
 | Email | List 2: `field_email`; Lists 1/3/4: blank (field not populated on those content types) |
 | Website | blank for all lists — not present anywhere in the API response |
@@ -70,6 +70,7 @@ All text fields arrive as raw Drupal HTML fragments (e.g. `<a href="/taxonomy/te
 | ListLanguage | `EN` |
 | RegCtry / RegCode | ZM / BZA |
 | ListCode | Jira ListNr (1-4) |
+| RegulationDate | List 4: `field_month_year_of_designation` from `/jsonapi/node/payment_system_institutions`, joined by node id; blank for Lists 1-3 (not published) |
 | ListProcessDate | run date (`%Y-%m-%d`) |
 
 ## ListLabel judgment calls
@@ -83,31 +84,35 @@ Per CLAUDE.md: 1 = bank, 2 = insurance, 3 = bank & insurance, 4 = everything els
 
 ## Notes / QA
 
-**Row counts** (run date 2026-07-27), all four lists on one page, fetched via the JSON API (215 raw records total):
+**Row counts** (v2, run date 2026-08-05), all four lists on one page, fetched via the JSON API (216 raw records → 213 after collapsing same-title duplicates, exactly what the site prints):
 
-| ListCode | ListName | Rows |
-|---|---|---|
-| 1 | Registered Commercial Banks | 15 |
-| 2 | Registered Non-Bank Financial Institutions | 90 |
-| 3 | Deposit Taking Non-Banks | 9 |
-| 4 | Payment System Institutions | 91 |
-| — | *(excluded: Liquidated Institutions, per Jira comment)* | 10 |
-| **Total output rows** | | **205** |
+| ListCode | ListName | Site count | Rows |
+|---|---|---|---|
+| 1 | Registered Commercial Banks | 15 | 15 |
+| 2 | Registered Non-Bank Financial Institutions | 100 − 9 liquidated = 91 | 91 |
+| 3 | Deposit Taking Non-Banks | 9 | 9 |
+| 4 | Payment System Institutions | 89 | 89 |
+| — | *(excluded: Liquidated Institutions, per Jira comment)* | 9 | — |
+| **Total output rows** | | | **204** |
 
-On-page summary-card counts at scrape time: 15 / 99 / 9 / 89 (Commercial Banks / non-bank institutions / Deposit Taking Non-Banks / Payment Systems). List 1 and List 3 match exactly (15, 9). Lists 2 and 4 look off at first glance but both reconcile exactly once the site's own aggregation logic is accounted for:
+The site's own footer reads *"Showing 1-10 of 213 institutions"* and its four named filter cards read **15 / 100 / 9 / 89**; clicking each filter was verified live. Every list now reconciles to the site exactly.
 
-- **List 2 (90 vs. site's 99)**: the site's "Registered non-bank institutions" card is **not** List 2 alone — it bundles List 2 + List 3 together: `90 (Non-Bank FI, excl. liquidated) + 9 (Deposit Taking Non-Banks) = 99`, an exact match. BOZ's own widget doesn't distinguish deposit-taking-ness within its non-bank count, but the Jira ticket explicitly asks for them as two separate lists (ListNr 2 vs. ListNr 3) — our split is correct per Jira, it just isn't how the site chooses to display the aggregate.
-- **List 4 (91 vs. site's 89)**: an exact difference of 2, matching the 2 duplicate CMS node pairs identified below (`BEELINE FINTECH LIMITED`, `JustTap Payments Limited` — each has two distinct node IDs in the raw feed for the same name). The site widget appears to count unique institution names (89); our scrape keeps both source records per the project's practice of reflecting the source faithfully rather than silently deduping.
+**v2 corrections (v1 output was wrong):**
 
-The API-derived counts are the authoritative source (every paginated record enumerated), and every count above is now traced to source, not left as an unexplained delta.
+- **List 4 over-counted by 2.** The raw feed returns 216 records but the site renders 213: the Angular front-end collapses records sharing a title inside one content type. There are exactly three such pairs — `BEELINE FINTECH LIMITED` (nodes 113831/113832), `JustTap Payments Limited` (3611/3138), `Access Financial Services Limited` (3381/3656, both liquidated). All six nodes are published (`status: true`), so these are genuine CMS content duplicates, not a publish-state filter. v1 emitted both of each payment-system pair (91 rows); v2 keeps the *richer* record of each pair — node 3611 "JustTap" carries an empty address while 3138 has the real one — giving 89, matching the site. This is not "deduping rows that appear separately": the site itself prints a single row for each, confirmed on the rendered grid.
+- **v1's reconciliation of List 2 was wrong.** v1's README claimed the site's non-bank card (then read as 99) bundled List 2 + List 3. It does not: the card counts the `non_bank_financial_institution` content type only, *including* liquidated institutions — `91 non-liquidated + 9 liquidated = 100`. Deposit Taking Non-Banks is a separate card (9) sourced from a different content type.
+- **List 2 gained one entity**: `ASA MICROFINANCE ZAMBIA LIMITED`, added by BOZ after the 2026-07-27 run (90 → 91).
+- **RegulationDate now populated for List 4.** The Drupal JSON:API node feed `/jsonapi/node/payment_system_institutions` exposes `field_month_year_of_designation` as a clean ISO date for all 91 payment-system nodes, joined by node id. The on-page grid column "Licensed Since" shows `-` only because that view omits the field. No equivalent date exists for Lists 1-3.
+- **City now recovered for List 4.** That content type has no city field, but its free-text `field_address` ends in the town; the town is matched against a Zambian town list (41 of the 43 non-empty addresses resolve; the 2 misses are the BEELINE "ZNFU Office Complex … Showground Area" address, which names no town).
 
-**Non-empty rates** (205 rows):
-- Name: 205/205 (100%), Cntry: 205/205 (100%), License_Type: 205/205 (100%)
-- Address_1: 156/205 (76%) — List 1: 15/15, List 2: 90/90, List 3: 8/9 (one bank, `LOLC FINANCE ZAMBIA`, has no postal address on file), List 4: 43/91 (48 of the 91 payment-system records have only a junk `"."` placeholder on the source, blanked rather than reported as real data)
-- Phone: 112/205 (55%) — only provided for Lists 1-3 (List 1: 15/15, List 2: 88/90, List 3: 9/9); List 4 has no phone field on that content type
-- City: 114/205 (56%) — same pattern as Phone (blank for List 4 by content-type design)
-- Email: 65/205 (32%) — only populated on List 2's content type; blank for Lists 1, 3, 4 (field not used on those content types)
-- Website: 0/205 (0%) — not present anywhere in the source API for any list; genuinely absent, not a parsing gap
+**Non-empty rates** (204 rows):
+- Name: 204/204 (100%), Cntry / RegCtry / RegCode / ListLanguage / ListLabel / RegulationType / ListProcessDate / License_Type: 100%
+- Address_1: 156/204 (76.5%) — List 1: 15/15, List 2: 91/91, List 3: 8/9 (`LOLC FINANCE ZAMBIA` has no postal address on file), List 4: 42/89 (47 payment-system records carry only a junk `"."` placeholder or nothing at source, blanked rather than reported as real data)
+- City: 156/204 (76.5%) — Lists 1-3 complete (100%); List 4: 41/89, derived from the address text as described above
+- Phone: 113/204 (55%) — only provided for Lists 1-3 (List 1: 15/15, List 2: 89/91, List 3: 9/9); List 4 has no phone field on that content type
+- RegulationDate: 89/204 (44%) — List 4 only (designation date); not published for Lists 1-3
+- Email: 65/204 (32%) — only populated on List 2's content type; blank for Lists 1, 3, 4 (field not used on those content types)
+- Website: 0/204 (0%) — not present anywhere in the source API for any list; genuinely absent, not a parsing gap
 
 **Encoding check**: regex `Ã©|â€™|Â |Ã¯|\?{3,}` — 0 flagged rows, clean.
 

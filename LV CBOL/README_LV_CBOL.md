@@ -3,114 +3,131 @@
 **Jira:** DECD-6826
 **Register:** Financial Market Participant Register
 **Entry point:** https://www.bank.lv/en/financial-market-participant-register
-**Version:** v3 (full rebuild — v1 and v2 are dead, see "What changed")
-**Last run:** 2026-08-20 → `LV CBOL SQL Ready 2026-08-20 18.45.00.xlsx`, **460 rows**
+**Version:** v4 (rewritten after the 2026-08-31 ticket update — v1/v2 are dead, v3 is superseded)
+**Last run:** 2026-09-02 → `LV CBOL SQL Ready 2026-09-02 17.10.47.xlsx`, **4398 rows**, 13/13 lists reconciled
+
+---
+
+## Why v4 exists
+
+On 2026-08-31 the requester (Guilherme Strelow Hilger) rewrote the ticket description and
+commented *"Done, please use the links in the Jira description!"*. Two things changed:
+
+1. **Every list now says "Extract all entities from the link or select the listName in the
+   Segment field and extract all entities."** The old description asked for specific
+   sub-segments per list; the new one does not. All sub-segment include/exclude selection
+   is therefore gone — each list is its parent segment taken whole.
+2. **ListNr 1 is renamed.** It was ListName "Investment service providers" pointing at the
+   alternative-investment-fund-managers segment (which never matched); it is now
+   **"Alternative investment fund managers"**, matching its own URL. ListNr 6 keeps
+   "Investment service providers".
+
+Output goes from **460 → 4398 rows**. The old run was not undercounting by accident — it
+was correctly implementing an instruction that has since been withdrawn.
 
 ---
 
 ## Lists
 
-Row counts below are **observed** from the 2026-08-20 run. Every list reconciled exactly
-against the count the register prints itself ("Found N results") — zero mismatches.
+Row counts are **observed** from the 2026-09-02 run. Each list is queried whole, and each
+reconciled exactly against the count the register prints itself ("Found N results").
 
-| ListNr | ListCode | ListLabel | ListName | Segment (discovered alias) | Source | Rows |
-|---|---|---|---|---|---|---|
-| 1 | LV CBOL 1 | 4 | Investment service providers | `3-alternative-investment-fund-managers` | JSON | 33 |
-| 2 | LV CBOL 2 | 2 | Insurance companies | `51-insurance-companies` | JSON | 7 |
-| 3 | LV CBOL 3 | 2 | Insurance Intermediaries | `137-insurance-intermediaries` | JSON | 90 |
-| 4 | LV CBOL 4 | 4 | Financial instruments market | `107-financial-instruments-market` | JSON | 111 |
-| 5 | LV CBOL 5 | 4 | Financial holdings | `471-financial-holdings` | JSON | 3 |
-| 6 | LV CBOL 6 | 4 | Investment service providers | `111-investment-service-providers` | JSON | 28 |
-| 7 | LV CBOL 7 | 4 | Investment management companies | `1-investment-management-companies` | JSON | 76 |
-| 8 | LV CBOL 8 | 4 | Crowdfunding service providers | `466-crowdfunding-service-providers` | JSON | 8 |
-| 9 | LV CBOL 9 | 1 | Co-operative Credit Unions | `94-co-operative-credit-unions` | JSON | 20 |
-| 10 | LV CBOL 10 | 1 | Credit institutions | `41-credit-institutions` | JSON | 11 |
-| 11 | LV CBOL 11 | 1 | Payment service providers | `236-payment-service-providers` | JSON | 44 |
-| 12 | LV CBOL 12 | 4 | Pension Funds | `135-pension-funds` | JSON | 14 |
-| 13 | LV CBOL 13 | 4 | Foreign exchange trading companies | `469-foreign-exchange-trading-companies` | JSON | 15 |
-| | | | | | **TOTAL** | **460** |
+| ListCode | ListLabel | ListName | Segment alias (from the ticket URL) | Rows |
+|---|---|---|---|---|
+| 1 | 4 | Alternative investment fund managers | `3-alternative-investment-fund-managers` | 202 |
+| 2 | 2 | Insurance companies | `51-insurance-companies` | 496 |
+| 3 | 2 | Insurance Intermediaries | `137-insurance-intermediaries` | 1522 |
+| 4 | 4 | Financial instruments market | `107-financial-instruments-market` | 204 |
+| 5 | 4 | Financial holdings | `471-financial-holdings` | 3 |
+| 6 | 4 | Investment service providers | `111-investment-service-providers` | 303 |
+| 7 | 4 | Investment management companies | `1-investment-management-companies` | 76 |
+| 8 | 4 | Crowdfunding service providers | `466-crowdfunding-service-providers` | 8 |
+| 9 | 1 | Co-operative Credit Unions | `94-co-operative-credit-unions` | 20 |
+| 10 | 1 | Credit institutions | `41-credit-institutions` | 425 |
+| 11 | 1 | Payment service providers | `236-payment-service-providers` | 1110 |
+| 12 | 4 | Pension Funds | `135-pension-funds` | 14 |
+| 13 | 4 | Foreign exchange trading companies | `469-foreign-exchange-trading-companies` | 15 |
+| | | | **TOTAL** | **4398** |
 
-Lists 1 and 6 intentionally share the ListName "Investment service providers" and list 7
-merges what used to be two URLs — kept as separate ListNr/ListCode entries exactly as the
-ticket numbers them.
+### Template fields (fixed — do not derive these at runtime)
+`RegCtry = 'LV'`, `RegCode = 'CBOL'`, `ListCode = '1'…'13'`. These are the three tokens of
+`<CC> <AGENCY> <listnr>`: the **two-letter country code**, the **agency code alone**, and the
+**bare ListNr**. Not `'Latvia'`, not `'LV CBOL'`, not `'LV CBOL 1'`. The writer asserts all
+three before saving.
+
+Lists overlap by design — an entity can sit in several segments (e.g. a bank appears in
+both list 10 and list 11, an AIFM in both list 1 and list 6). Nothing is deduped: the
+register's own row count per list is the truth, and QA counts against the site.
 
 ### ListLabel reasoning
 House rule: `1` = bank, `2` = insurance, `3` = both, `4` = everything else.
-- **2 (insurance)** — lists 2 and 3 are insurers and insurance intermediaries.
-- **1 (bank)** — list 9 (credit unions), list 10 (credit institutions/banks) and list 11
-  (payment service providers, whose selection includes `Banks` and credit institutions).
-- **4 (other)** — funds, holdings, instruments market, pension funds, FX and crowdfunding.
+- **2 (insurance)** — lists 2 and 3.
+- **1 (bank)** — lists 9 (credit unions), 10 (credit institutions), 11 (payment services).
+- **4 (other)** — funds, holdings, instruments market, pension funds, FX, crowdfunding.
 
-List 11 is the softest call: it is a payment-services register that happens to contain
-banks. Flagged for the requester to overturn if they would rather see `4`.
+**List 11 is the one soft call, and it got softer in v4.** When it was 44 hand-picked rows
+built around the Banks sub-segment, `1` was clearly right. Taken whole it is 1110 rows
+dominated by e-money / payment institutions and EEA passporting entities, so `4` is
+arguable. Left at `1` (unchanged from the last delivery) — flag for the requester.
 
 ### RegulationType
-All 460 rows are `Regulated`. Every list is a positive/authorised register, and all
-not-in-good-standing sub-segments were kept out (below).
+All 4398 rows are `Regulated`. **Liquidation / suspension status is deliberately not
+covered** (user instruction, 2026-09-02): the segments are taken exactly as the ticket
+defines them and no status sub-segment is fetched, flagged, or subtracted. Note this means
+the 5 entities in `169-credit-institutions-in-liquidation` (ABLV Bank, Baltic International
+Bank, Latvijas Krājbanka, …) are inside list 10's 425 and carry `Regulated` like every
+other row. If that is not wanted, it is a one-line change — see "Judgment calls".
 
----
-
-## Row-count reconciliation
-
-The register prints its own total for any filter, so the scraper parses it and compares.
-The run log prints `reconciled: site declares N / parsed N` per list and a loud
-`*** MISMATCH ***` otherwise. **All 13 lists reconciled on the last run.**
-
-Note the gap between a segment's *whole* size and the rows taken — this is the ticket's
-sub-segment selection working, not data loss. Example: credit institutions has 424
-entities in total, but the ticket asks only for Banks + Representative offices = 11.
-The other 413 are EEA passporting entities (`Freedom to provide services` = 403,
-`Freedom of establishment` = 5) plus 5 in liquidation.
-
-| List | Whole segment | Taken | Why the difference |
-|---|---|---|---|
-| 1 | 202 | 33 | only Licensed + Registered managers |
-| 2 | 496 | 7 | only Life + Non-life; the other 489 are EEA branches/FPS/liquidation |
-| 3 | 1524 | 90 | all categories except the two EEA ones |
-| 4 | 203 | 111 | Depositary + Issuers + Regulated market organizers |
-| 6 | 300 | 28 | Investment firms + Credit institutions + Investment management companies |
-| 10 | 424 | 11 | Banks (10) + Representative offices (1) |
-| 11 | 1107 | 44 | the six sub-segments named in the ticket comment |
-
-Sub-segments partition their parent exactly — verified on credit institutions:
-10 + 5 + 403 + 1 + 5 = 424. No double counting, and no row is deduped.
+Of the five not-in-good-standing sub-segments that exist on the register, only that one is
+non-empty; `151-insurance-companies-in-liquidation`, `152-insolvent-insurance-companies`,
+`159-provision-of-services-suspended` and `155-provision-of-payment-services-suspended` all
+return **0 results** as of 2026-09-02.
 
 ---
 
 ## Site quirks (things that will break this later)
 
-1. **The old site is gone.** Every `uzraudziba.bank.lv/en/market/*` URL in the ticket
-   301-redirects to one landing page on `www.bank.lv`. Two different old URLs return
-   byte-identical HTML. The ticket's URL column is therefore stale — the URLs above are
-   the live equivalents.
-2. **The listing is JS-paginated with `<button value="N">`, not links.** There are no
-   pagination hrefs to follow. `?page=N` works, but `start=` / `offset=` / `p=` /
-   `limitstart=` are **silently ignored and return page 1 with HTTP 200** — a soft-404
-   trap that would produce 10 rows repeated forever.
-3. **`?format=json` is the stable way in.** It returns `resultCount`, `results`,
+1. **`?limit=N` silently caps a page at 1000.** This is the big one, and it is why v3's
+   fetch strategy could not survive the ticket change. `?limit=5000&segments=137-insurance-
+   intermediaries` returns **HTTP 200 with exactly 1000 rendered rows** while `resultCount`
+   still says 1522. No error, no truncation notice. v3 got away with a single-shot
+   `limit=5000` only because its sub-segment filtering kept every list under 1000; the
+   moment lists 3 and 11 went whole, that same call would have quietly lost 632 rows.
+   v4 requests `limit=1000` and pages.
+2. **`?page=N` is honoured and is the only pagination that works.** Measured: `limit=1000
+   &page=1` → 1000 rows, `page=2` → 522, `page=3` → 0, summing to the declared 1522 with no
+   overlap. `limit=500` paginates cleanly too. But `start=` / `offset=` / `p=` /
+   `limitstart=` are **silently ignored and return page 1 with HTTP 200** — a soft-404 trap
+   that would produce the first page repeated forever.
+3. **The page loop must not stop on "we have enough".** It stops on a short/empty page only,
+   so that the reconciliation against `resultCount` is an independent check. A loop that
+   halts once it reaches the declared count can never report a mismatch.
+4. **The old site is gone.** Every `uzraudziba.bank.lv/en/market/*` URL from the original
+   ticket 301-redirects to one landing page on `www.bank.lv`. Two different old URLs return
+   byte-identical HTML.
+5. **`?format=json` is the stable way in.** Returns `resultCount`, `results`,
    `childSegments` and `tags`. `results`/`childSegments` are HTML *fragments*, not
-   structured data, so they still need BeautifulSoup. `&limit=5000` returns the whole
-   result set in one request and removes pagination entirely. `limit=0` is **not**
-   "unlimited" — it drops the `results` key and will `KeyError`.
-4. **Sub-segments reuse the same `segments=` parameter** as top-level segments, and
-   accept a comma-separated list. `segments=42-banks,50-representative-offices-...`
-   returns 11.
-5. **Duplicate sub-segment titles under one parent.** Financial instruments market has
-   *two* `Freedom of establishement` entries (`478-` and `480-`) and two
-   `Freedom to provide services` (`479-`, `481-`). Match on alias, never assume titles
-   are unique. Note the site's own spelling "establishement" is inconsistent with
-   "establishment" elsewhere — matching is accent-stripped substring, never `==`.
-6. **Latvian diacritics.** Names carry ā č ē ģ ī ķ ļ ņ š ū ž. All title matching goes
-   through NFKD accent-strip + NFKC + lowercase.
-7. **Excel eats registration numbers.** `40003764029` becomes `4.000376e+10` unless the
-   ID columns are pinned to text before `to_excel`. Handled; do not remove that block.
-8. **Segment IDs are numeric and unstable across renames** (`1000-latvian-investment-
-   management-companies` sits next to `1-investment-management-companies`). Nothing is
-   hard-coded — segments come from the landing page and sub-segments from
-   `input[data-alias]` each run, and any keyword matching nothing prints
-   `SKIPPED — no sub-segment whose title contains '<keyword>'`.
+   structured data, so BeautifulSoup is still needed. `limit=0` is **not** "unlimited" — it
+   drops the `results` key and will `KeyError`.
+6. **Duplicate names are real rows, not a bug.** List 3 renders 1522 rows over 1518 distinct
+   names — four personal names appear twice as separate registrations. Never dedupe.
+7. **Row-level status is invisible.** An entity in `169-credit-institutions-in-liquidation`
+   renders its info-items as `['Credit institutions', 'Reg. Nr. 50003149401', 'Latvia']` —
+   the liquidation status appears nowhere on the listing row. Anyone who later wants to
+   flag those rows must fetch the status sub-segment separately and match on reg nr; it
+   cannot be read off the parent fetch.
+8. **Latvian diacritics.** Names carry ā č ē ģ ī ķ ļ ņ š ū ž. Title matching goes through
+   NFKD accent-strip + NFKC + lowercase — never `==`.
+9. **Excel eats registration numbers.** `40003764029` becomes `4.000376e+10` unless the ID
+   columns are pinned to text before `to_excel`. Handled, and the script now reads the
+   workbook back and asserts no ID came back as a float. Do not remove that block.
+10. **Segment ids are numeric and unstable across renames** (`1000-latvian-investment-
+    management-companies` sits next to `1-investment-management-companies`). v4 uses the
+    ticket's aliases verbatim as the requester asked, but still reads the landing page each
+    run and prints `*** ALIAS DRIFT ***` if the live link for that segment title no longer
+    matches the ticket. All 13 matched on 2026-09-02.
 
-No Cloudflare, no JS rendering needed, no Selenium. Plain `requests` + BeautifulSoup with
+No Cloudflare, no JS rendering, no Selenium. Plain `requests` + BeautifulSoup with
 `verify=False` for the corporate TLS proxy.
 
 ---
@@ -128,71 +145,66 @@ Populated from the listing rows (same for all 13 lists):
 | `CoType` | the entity's other segment tags, `; ` joined |
 | `Typology` / `ListName` | per ticket ListName |
 | `RegulationType` | `'Regulated'` |
-| `RegCtry` | `'Latvia'` |
-| `ListCode` | `LV CBOL <nr>` |
+| `RegCtry` | `'LV'` (fixed) |
+| `RegCode` | `'CBOL'` (fixed) |
+| `ListCode` | bare ticket ListNr, `'1'`…`'13'` (fixed) |
 | `ListLanguage` | `'EN'` |
 | `ListProcessDate` | `now.strftime('%Y-%m-%d')` |
 
-**Empty by design:** `Address_1`, `City`, `Zip`, and licence dates. See below.
-75 of 460 rows have an empty `InternalID_1` — these are foreign entities the register
-lists without a Latvian registration number. Not a parsing failure.
+**Empty by design:** `Address_1`, `City`, `Zip`, and licence dates — see judgment call 2.
+
+**3948 of 4398 rows have an empty `InternalID_1`, and that is correct.** Verified by
+country: **100%** of the 327 Latvian rows carry a registration number, versus 3% of the
+4071 foreign rows. The register lists EEA passporting entities (freedom of establishment /
+freedom to provide services) without a Latvian reg nr. The proportion jumped from v3's
+16% empty purely because v4 includes those EEA entities, which the old sub-segment
+selection filtered out. Top countries: Germany 491, Austria 465, France 464, Latvia 327,
+Ireland 250, Luxembourg 249.
 
 ---
 
-## What changed vs v1/v2, and why
+## Built-in checks
 
-v2 could not produce a single row, and would not have run in production even if the site
-were unchanged:
+The run fails loudly rather than shipping a bad file:
 
-| Defect in v1/v2 | v3 |
-|---|---|
-| Scrapes `uzraudziba.bank.lv/en/market/*` — every URL now 301s to one page | targets `www.bank.lv` register |
-| Selectors `div.categories-list`, `div.posts-block` — **0 occurrences** on the live site | `.result-content` from the JSON fragment |
-| **Selenium + ChromeDriver** — banned on the control server (no Windows automation) | plain `requests` |
-| Hard-coded `C:\Users\wuj1\OneDrive - Moody's\...` | `os.path.dirname(os.path.abspath(__file__))` with notebook fallback |
-| **`sqldict` had a 44th key `'Check'`** — schema violation | exactly the fixed 43 keys, asserted before write |
-| Rows built as loose dicts, columns could drift | single `add_row(**kw)` writing all 43 keys, raising on unknown |
-| Hard-coded `skip_by_reg` URL-substring lists per regulator | sub-segments discovered each run, selected by title keyword |
-| 12 of 13 lists commented out — only list 11 live | all 13 lists run |
-| Crawled category trees with `?l=1..200` probing | one JSON call per list |
+- per-list `reconciled: site declares N / parsed N`, or `*** MISMATCH ***`, plus a
+  `lists reconciled: 13/13` line in the summary
+- `*** ALIAS DRIFT ***` if a ticket alias no longer matches the live landing page
+- schema assert: columns are exactly the fixed 43-key `sqldict`
+- **template-field assert** — `RegCtry` is exactly `LV`, `RegCode` is exactly `CBOL`, and
+  every `ListCode` is a bare number. An earlier revision shipped `RegCode` empty and
+  `ListCode` as `'LV CBOL 1'`; this assert is why that cannot happen again
+- **Name-content assert** — a row count alone does not prove the Name column holds names
+  (a sibling regulator once reconciled perfectly with `Name` full of `Yes`/`No`), so the
+  script asserts separately that no Name is blank or a stray flag value, and prints the
+  distinct-name count
+- **Excel round-trip assert** — the workbook is re-read after writing and `InternalID_1` is
+  checked for float coercion
 
 ---
 
 ## Judgment calls for the requester
 
-1. **List 8 (Crowdfunding) — the ticket comment cannot be satisfied as written.**
-   It says "Extract the entities under *Service providers from the EEA*", but the
-   crowdfunding segment has **no sub-segments at all** on the new site. v3 takes the whole
-   segment (8 entities). Confirm that is what is wanted.
-2. **List 11 sub-segment "Co-operative credit unions" does not exist** under Payment
-   service providers on the new site. The ticket names it; the register does not have it
-   there (it is its own top-level segment, already covered as list 9). The other six named
-   sub-segments were all found and used. Confirm no double count is wanted.
-3. **Not-in-good-standing sub-segments are excluded**, per v2's precedent and because the
-   ticket does not ask for them. The scraper carries an `EXCLUDE_ALWAYS` guard for
-   `liquidation` / `insolvent` / `suspended`. In practice the ticket's own include-rules
-   never selected them, so **nothing was actively dropped by that guard on this run** — but
-   the requester should know these exist and can be added as a cancelled/revoked list:
-   - `169-credit-institutions-in-liquidation` (5)
-   - `151-insurance-companies-in-liquidation`, `152-insolvent-insurance-companies`
-   - `159-provision-of-services-suspended`, `155-provision-of-payment-services-suspended`
-4. **`Address_1` / `City` / `Zip` and licence dates are empty.** Detail pages carry legal
-   address and per-licence valid-from dates, but they are **~1.1 MB each**; 460 entities
-   is roughly **500 MB** of transfer and a much longer run. `parse_detail()` is implemented
-   and working behind `FETCH_DETAIL = False` — flip one flag to enable, no rewrite needed.
-   Requester decides whether the address is worth the cost.
-5. **`ListLabel` for list 11** — see reasoning above; `1` vs `4` is arguable.
-6. **The register also exposes a `202-crypto-asset-market` segment (14 entities)** that
-   the ticket does not mention. Not scraped. Likely worth a follow-up ticket.
+1. **`ListLabel` for list 11** — `1` vs `4`; see reasoning above. Left at `1`.
+2. **`Address_1` / `City` / `Zip` and licence dates are empty.** Detail pages carry legal
+   address and per-licence valid-from dates but are **~1.1 MB each**. At v3's 460 entities
+   that was ~500 MB; at 4398 it is roughly **4.8 GB** and a very long run. `parse_detail()`
+   is implemented and working behind `FETCH_DETAIL = False` — flip one flag, no rewrite
+   needed. Requester decides whether the address is worth the cost.
+3. **Liquidation entities are included and marked `Regulated`** (see RegulationType above).
+   Deliberate, per instruction. Say the word and they can be excluded or given their own
+   RegulationType.
+4. **The register exposes a 14th segment, `202-crypto-asset-market`**, that the ticket does
+   not mention. Not scraped. Likely worth a follow-up ticket.
 
 ---
 
 ## Running
 
 ```bash
-python3 LV_CBOL_v3.py
+python3 LV_CBOL_v4.py
 ```
 
 Writes `LV CBOL SQL Ready <YYYY-MM-DD HH.MM.SS>.xlsx` (sheet `SQL Ready`) into this
-folder — not `tempfolder/`. The notebook `LV_CBOL_v3.ipynb` is generated from the `.py`
-via the `#---- Begin_<name> ----` markers and executes the identical code.
+folder — not `tempfolder/`. Runtime ~1 min. The notebook `LV_CBOL_v4.ipynb` is generated
+from the `.py` via the `#---- Begin_<name> ----` markers and holds byte-identical code.

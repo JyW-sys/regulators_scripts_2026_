@@ -2,21 +2,44 @@
 
 **Jira:** DECD-6832 — AI ECCBAI
 **Regulator:** Eastern Caribbean Central Bank (ECCB)
-**RegCtry:** `AI` · **RegCode:** `ECCBAI` · **ListLanguage:** `EN`
-**Run:** `python3 AI_ECCBAI_v1.py` (or open `AI_ECCBAI_v1.ipynb`)
+**ListLanguage:** `EN`
+**Run:** `python3 AI_ECCBAI_v2.py` (or open `AI_ECCBAI_v2.ipynb`)
 
-The ECCB is the shared central bank of eight Eastern Caribbean member territories. The ticket
-is filed under Anguilla (`AI`), but its comment says *"collect all entities and addresses from
-the different countries"*, so **all eight territories are scraped**. `RegCtry`/`RegCode` stay
-`AI`/`ECCBAI`; `Cntry` varies per row and carries the territory each institution is licensed in.
+The ECCB is **one supranational central bank shared by eight Eastern Caribbean member
+territories**. The ticket is filed under Anguilla (`AI`), but its comment says *"collect all
+entities and addresses from the different countries"*, so **all eight territories are scraped**.
+
+Because the licence is issued by the currency union rather than by a national regulator, the
+register is parsed **once** and then emitted **once per member regulator** — the same treatment
+`CF CEMACCF` gives the six CEMAC/COBAC members. See *Multi-regulator output* below.
+
+| Territory (`RegCtry` / `Cntry`) | `RegCode` |
+|---|---|
+| `AI` Anguilla | `ECCBAI` |
+| `AG` Antigua and Barbuda | `ECCBAG` |
+| `DM` Commonwealth of Dominica | `ECCBDM` |
+| `GD` Grenada | `ECCBGD` |
+| `KN` Saint Christopher (St Kitts) and Nevis | `ECCBKN` |
+| `LC` Saint Lucia | `ECCBLC` |
+| `MS` Montserrat | `ECCBMS` |
+| `VC` Saint Vincent and the Grenadines | `ECCBVC` |
+
+---
+
+## Version history
+
+| Version | Change |
+|---|---|
+| `v1` | Initial build. 31 rows, one workbook, all tagged `RegCtry`/`RegCode` = `AI`/`ECCBAI`. |
+| `v2` | **Multi-regulator.** Same 31 parsed rows replicated across all eight ECCB member regulators → 248 rows, written as **eight workbooks, one per regulator**, sharing one run timestamp. Parsing logic unchanged. |
 
 ---
 
 ## Lists
 
-| ListNr | ListCode | ListLabel | ListName | URL | Source type | Rows |
-|---|---|---|---|---|---|---|
-| 1 | 1 | 1 | Licensed Finance Companies | https://www.eccb-centralbank.org/register-of-licensed-financial-institutions | PDF (`pdfplumber`, ruled table) | **31** |
+| ListNr | ListCode | ListLabel | ListName | URL | Source type | Unique rows | Delivered rows |
+|---|---|---|---|---|---|---|---|
+| 1 | 1 | 1 | Licensed Finance Companies | https://www.eccb-centralbank.org/register-of-licensed-financial-institutions | PDF (`pdfplumber`, ruled table) | **31** | **248** (31 × 8 regulators) |
 
 **ListLabel = 1 (bank).** The register is issued under **section 13(1) of the Banking Act, 2015**
 and contains commercial banks, non-bank credit institutions and bank holding companies. It is a
@@ -24,6 +47,76 @@ banking-sector register with no insurance content, so `1` rather than `3` or `4`
 
 **ListValidityDate = `2026-06-25`**, parsed from the anchor label (`… Banking Act 25.6.26`) with
 the upload-date stamp in the href as fallback.
+
+---
+
+## Multi-regulator output (v2)
+
+The PDF is downloaded and parsed **once**. The resulting 31-row frame is tagged
+`RegCtry`/`RegCode` = `AI`/`ECCBAI`, then copied seven more times with `RegCtry`/`RegCode`
+rewritten to each of the other member territories. **`Cntry` is never rewritten** — it keeps
+carrying the territory the institution is actually licensed in, so *every* regulator copy holds
+the full eight-territory list:
+
+```
+Rows per RegCtry / RegCode        Rows per Cntry, within any one copy
+  AG  ECCBAG   31                   AG 6   AI 2   DM 2   GD 3
+  AI  ECCBAI   31                   KN 5   LC 8   MS 1   VC 4
+  DM  ECCBDM   31                   ------------------------------
+  GD  ECCBGD   31                   total 31
+  KN  ECCBKN   31
+  LC  ECCBLC   31
+  MS  ECCBMS   31
+  VC  ECCBVC   31
+  ----------------
+  total       248
+```
+
+**Why the full list per regulator, not just each regulator's own territory?** Because that is
+the shape `CF CEMACCF_v2` ships (61 unique rows × 6 CEMAC regulators = 366 rows, each carrying
+all six `Cntry` values). The country-filtered alternative is present in that scraper but
+commented out. To switch to it here, set **`OWN_COUNTRY_ONLY = True`** in the *Variable* section
+— that yields 31 rows total (each regulator getting only its own territory's licensees).
+
+Two guards run at import time and will fail loudly rather than ship a lopsided file:
+
+- the eight regulator ISO codes must equal the set of ISO codes the PDF-section parser can
+  produce (`COUNTRY_TOKEN_TO_ISO`) — so an ECCB membership change breaks the run;
+- every `RegCode` must equal `'ECCB' + RegCtry`.
+
+Post-replication the script asserts `248 == 31 × 8` and that eight distinct `RegCode`s are
+present.
+
+### One workbook per regulator
+
+`WRITE_PER_REGULATOR = True` (default) splits the frame on `RegCode` and writes **eight
+files into this folder**, all carrying the *same* run timestamp so they read as one delivery:
+
+```
+AG ECCBAG SQL Ready 2026-08-25 14.50.21.xlsx     31 rows
+AI ECCBAI SQL Ready 2026-08-25 14.50.21.xlsx     31 rows
+DM ECCBDM SQL Ready 2026-08-25 14.50.21.xlsx     31 rows
+GD ECCBGD SQL Ready 2026-08-25 14.50.21.xlsx     31 rows
+KN ECCBKN SQL Ready 2026-08-25 14.50.21.xlsx     31 rows
+LC ECCBLC SQL Ready 2026-08-25 14.50.21.xlsx     31 rows
+MS ECCBMS SQL Ready 2026-08-25 14.50.21.xlsx     31 rows
+VC ECCBVC SQL Ready 2026-08-25 14.50.21.xlsx     31 rows
+                                          total 248 rows
+```
+
+Naming follows the repo convention `<RegCtry> <RegCode> SQL Ready <stamp>.xlsx`, so each file
+is named for the regulator it belongs to rather than for this folder.
+
+Every workbook is **written, re-read and asserted individually** (row count, 43-column schema,
+no scientific-notation coercion, `Name` present and re-read as a string). A final check re-opens
+all eight and asserts they sum back to the 248 in-memory rows.
+
+`WRITE_COMBINED = True` *additionally* writes all 248 rows into one workbook named
+`AI ECCBAI ALL SQL Ready <stamp>.xlsx` — the `ALL` infix exists so it cannot be mistaken for,
+or overwrite, the 31-row Anguilla workbook. Off by default; the eight files already hold the
+same data.
+
+Both flags live in the *Variable* section.
 
 ---
 
@@ -93,9 +186,10 @@ the upload-date stamp in the href as fallback.
 | RESTRICTIONS LISTED ON LICENCE | `CoType` | `None` → empty |
 | HEAD OFFICE/PARENT COMPANY'S ADDRESS (line 1) | `Name - Mother Company` | blank when `Not applicable` |
 | HEAD OFFICE/PARENT COMPANY'S ADDRESS (rest) | `Address_1 - Mother company` | |
-| country section heading | `Cntry` | ISO-2 of the territory |
+| country section heading | `Cntry` | ISO-2 of the **licensing** territory — unchanged by the replication |
 | — | `RegulationType` | `Regulated` (positive register) |
-| — | `RegCtry` / `RegCode` / `ListLanguage` | `AI` / `ECCBAI` / `EN` |
+| — | `RegCtry` / `RegCode` | one of the eight pairs in the table at the top; every row is emitted under all eight |
+| — | `ListLanguage` | `EN` |
 | — | `ListCode` / `ListLabel` / `ListName` | `1` / `1` / `Licensed Finance Companies` |
 | — | `ListValidityDate` / `ListProcessDate` | `2026-06-25` / run date |
 
@@ -115,7 +209,9 @@ mid-street-name. Flagged below for the requester.
 ## Row-count reconciliation
 
 The register numbers its entries **per country** in the `NO` column. The scraper parses that
-number and compares it with the rows it produced. Output of the actual run:
+number and compares it with the rows it produced. Reconciliation runs on the **31 unique parsed
+rows, before replication** — the ×8 that follows is a pure copy. Output of the actual run
+(2026-08-25):
 
 | Country section (as printed in the PDF) | Cntry | Scraped | Declared max `NO` | |
 |---|---|---|---|---|
@@ -145,6 +241,13 @@ own count; removing them would break QA-by-row-count.
    comment asks for "all entities and addresses from the different countries". Delivered all 31
    rows across 8 territories with `Cntry` varying. **If only Anguilla is wanted, the answer is
    2 rows.** Please confirm.
+1b. **Replication shape (v2).** Each of the eight `ECCB<CC>` regulator codes receives the full
+   31-row register (248 rows total), following `CF CEMACCF`. If the intent is instead "each
+   regulator owns only its own territory", set `OWN_COUNTRY_ONLY = True` → 31 rows total,
+   spread over the eight files as 2/6/2/3/5/8/1/4. Confirm which shape is wanted.
+1c. ~~Should the eight workbooks go into sibling `AG ECCBAG/`, `KN ECCBKN/`, … folders?~~
+   **Settled (2026-08-25): no.** All eight stay in `AI ECCBAI/`. No new regulator folders are
+   created for the other seven ECCB members — this scraper owns the whole currency union.
 2. **ListName mismatch.** The ticket calls List 1 *"Licensed Finance Companies"*; the source
    document is titled *"Register of Financial Institutions and Financial Holding Companies
    Licensed Under the Banking Act, 2015"*. The ticket's `ListName` was used verbatim. Confirm
@@ -185,9 +288,13 @@ own count; removing them would break QA-by-row-count.
 
 ## Output
 
-`AI ECCBAI SQL Ready <YYYY-MM-DD HH.MM.SS>.xlsx`, sheet `SQL Ready`, written to this folder
-(not `tempfolder/`). 43 columns, fixed schema, asserted at import time.
+**Eight workbooks**, `<RegCtry> <RegCode> SQL Ready <YYYY-MM-DD HH.MM.SS>.xlsx`, sheet
+`SQL Ready`, written to **this folder** (not `tempfolder/`). All eight ECCB members deliver from
+`AI ECCBAI/`; no sibling folders are created for the other seven (decided 2026-08-25 — this
+scraper owns the whole currency union). 31 rows each, 248 total; 43 columns,
+fixed schema, asserted at import time. See *One workbook per regulator* above for the file list
+and the `WRITE_COMBINED` option.
 
-ID/Zip/Phone columns are forced to text before writing, and the workbook is **read back after
-writing** to assert no value was coerced into scientific notation and that `Name` round-trips as
-a string.
+ID/Zip/Phone columns are forced to text before writing, and **each** workbook is read back after
+writing to assert no value was coerced into scientific notation, the 43-column schema is intact,
+and `Name` round-trips as a non-empty string.

@@ -20,7 +20,9 @@ sqldict={'bvdid': [], 'priority': [], 'ListLabel': [], 'Typology': [], 'EntryTyp
 `now=datetime.datetime.now()` 
 `processdate = now.strftime('%Y-%m-%d')`
 `saldict['ListProcessDate'].append(processdate)`
-
+- Don't print sth from website directly, because control server often show that error :
+`File "encodings\cp1252.py", line 19, in encode`
+`UnicodeEncodeError: 'charmap' codec can't encode characters`
 
 
 ## Layout

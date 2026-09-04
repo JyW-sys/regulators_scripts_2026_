@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import json
 import datetime
 import warnings
@@ -13,6 +14,26 @@ from bs4 import BeautifulSoup
 
 requests.packages.urllib3.disable_warnings()
 warnings.filterwarnings('ignore')
+
+# The control server runs a cp1252 console: printing a scraped Chinese string
+# raises UnicodeEncodeError and kills the run. Belt: force the stream to utf-8
+# where the interpreter allows it. Braces: never hand raw scraped text to
+# print() - always route it through safe() below.
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
+
+def safe(value, limit=80):
+    """ASCII-only, length-capped rendering of any scraped value, for print()."""
+    if value is None:
+        return ''
+    if isinstance(value, (list, tuple)):
+        return '[' + ', '.join(safe(v, limit) for v in value) + ']'
+    text = str(value).encode('ascii', 'replace').decode('ascii')
+    return text if len(text) <= limit else text[:limit] + '...'
 
 
 #---- Begin_fileName ----
@@ -189,7 +210,7 @@ def pick_latest(docs, keyword):
     """Newest document whose title contains keyword. Loud SKIPPED message if none."""
     hits = [d for d in docs if keyword in (d.get('docSubtitle') or d.get('docTitle') or '')]
     if not hits:
-        print("SKIPPED - no document whose title contains '{}'".format(keyword))
+        print("SKIPPED - no document whose title contains '{}'".format(safe(keyword)))
         return None
     hits.sort(key=lambda d: d.get('publishDate') or '', reverse=True)
     return hits[0]
@@ -215,7 +236,7 @@ def download_attachment(doc_id):
     path = os.path.join(tempfolder, 'doc_{}.pdf'.format(doc_id))
     with open(path, 'wb') as fh:
         fh.write(r.content)
-    print('[INFO] : - downloaded {} ({} bytes) -> {}'.format(att.get('title'), len(r.content), os.path.basename(path)))
+    print('[INFO] : - downloaded {} ({} bytes) -> {}'.format(safe(att.get('title')), len(r.content), os.path.basename(path)))
     return path, att.get('title'), data.get('publishDate'), data.get('docSubtitle')
 
 
@@ -273,7 +294,7 @@ for reg in regdict:
 
     doc_id = doc['docId']
     title = doc.get('docSubtitle') or doc.get('docTitle') or ''
-    print('[INFO] : - matched docId {} "{}" published {}'.format(doc_id, title, doc.get('publishDate')))
+    print('[INFO] : - matched docId {} "{}" published {}'.format(doc_id, safe(title), doc.get('publishDate')))
 
     path, att_title, publish_date, subtitle = download_attachment(doc_id)
     if path is None:
@@ -281,7 +302,7 @@ for reg in regdict:
         continue
 
     rows, header, n_pages = extract_pdf_rows(path)
-    print('[INFO] : - {} pages, header = {}'.format(n_pages, header))
+    print('[INFO] : - {} pages, header = {}'.format(n_pages, safe(header)))
     print('[INFO] : - extracted {} data rows'.format(len(rows)))
 
     if header is None:
@@ -292,7 +313,7 @@ for reg in regdict:
     idx = {name: header.index(name) for name in EXPECTED_HEADER if name in header}
     missing_cols = [c for c in EXPECTED_HEADER if c not in idx]
     if missing_cols:
-        print('[WARN] : - PDF header is missing expected column(s) {}'.format(missing_cols))
+        print('[WARN] : - PDF header is missing expected column(s) {}'.format(safe(missing_cols)))
 
     regdate = (publish_date or doc.get('publishDate') or '')[:10]
     validity = parse_asof(title)
@@ -391,7 +412,7 @@ assert len(check) == len(df), '[ERROR] : - round-trip row count changed'
 sample = check.loc[check['ListCode'] == '3', 'InternalID_1']
 if len(sample):
     val = sample.iloc[0]
-    print('[INFO] : - round-trip check InternalID_1 = {!r} (type {})'.format(val, type(val).__name__))
+    print('[INFO] : - round-trip check InternalID_1 = {} (type {})'.format(safe(val), type(val).__name__))
     assert isinstance(val, str) and val.isdigit() and val.startswith('0'), \
         '[ERROR] : - leading-zero ID was destroyed by Excel: {!r}'.format(val)
 print('[INFO] : - round-trip check passed, {} columns'.format(len(check.columns)))

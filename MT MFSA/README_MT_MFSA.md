@@ -28,8 +28,9 @@ is a WordPress page whose entire content is:
 The real application is a separate ASP.NET Core app at `https://fsr.mfsa.mt`. Scraping the
 WordPress page yields nothing.
 
-**A clean JSON API exists — no browser, no driver.** The endpoints are named in plain sight in
-`https://fsr.mfsa.mt/js/custom/searchlicenceholder.js`:
+**A clean JSON API exists** — no browser is needed to *parse* anything, though one is needed
+to *fetch* on some boxes (see "Cloudflare blocks the control server" below). The endpoints are
+named in plain sight in `https://fsr.mfsa.mt/js/custom/searchlicenceholder.js`:
 
 | Endpoint | Purpose |
 |---|---|
@@ -40,6 +41,50 @@ WordPress page yields nothing.
 
 Both dropdowns are discovered at runtime; nothing is hard-coded, so a new sector or authorisation
 type is picked up automatically.
+
+### Cloudflare blocks the control server (fixed in v3.1)
+
+`fsr.mfsa.mt` is behind Cloudflare. The 2026-08-21 production run died on the **very first**
+call, before a single row was built:
+
+```
+File ".../MT-MFSA/MT-MFSA.py", line 141, in <module>   parents = get_json(session, EP_PARENTS)
+File ".../MT-MFSA/MT-MFSA.py", line 101, in get_json   raise RuntimeError(...)
+RuntimeError: giving up on https://fsr.mfsa.mt/LicenceTypes/getParentLicenceTypes
+    params=None : HTTP 403
+```
+
+The same endpoint returned HTTP 200 from the dev Mac. **Header tuning does not fix this** —
+measured on the dev Mac, bare / Mac-UA / Windows-UA / full-browser-headers / full+XHR-headers
+*all* returned 200, so the refusal keys on the *client* (egress IP + TLS fingerprint), not on
+what is sent.
+
+v3.1 routes every call through a `Channel` that tries `requests` first and, once refused,
+issues each later call as a **same-origin synchronous XHR from inside a real Chrome** parked
+on `https://fsr.mfsa.mt/`. The XHR inherits the origin, its session cookies (which are
+mandatory — see quirk 1) and the browser's own TLS fingerprint, so it cannot be told apart
+from the app's own traffic. This is the pattern already proven in production by
+`HK IAHK/HK_IAHK_v1_5.py`.
+
+Details that matter:
+
+- **The switch is sticky and one-way.** With ~12.6k holders over 186 authorisation types,
+  re-testing `requests` per call would cost one refusal per call for the whole run.
+- **A `403` breaks out of the `requests` retry loop immediately** rather than burning
+  `MAX_RETRY × 5 s` first — Cloudflare refusing this client is not a transient condition.
+  Other statuses (notably `429`) still get the full backoff.
+- **`options.headless(False)` must stay.** Cloudflare challenges headless Chrome and it never
+  clears. A box showing an "I am not a robot" checkbox needs it ticked by hand once, or
+  `CLEARANCE_TIMEOUT` (120 s) raised.
+- **`DrissionPage` is imported lazily**, so a box where `requests` works never needs it.
+- Browser calls retry on `RETRY_STATUSES` with exponential backoff and re-anchor the origin
+  from attempt 2, in case the refusal is a re-armed challenge.
+
+Verified 2026-08-25 on the dev Mac by forcing the fallback: `requests` and the browser both
+returned **17 sectors** with identical names, and the browser path also carried query strings
+correctly (7 authorisations under *Banking*, 30 holders under *Credit Institutions*, first
+holder `AKBANK T.A.S.`). **Not verified from the control server** — the 403 only reproduces
+from that box.
 
 ### Site quirks that will bite later
 
@@ -165,13 +210,56 @@ blank: 0 non-blank values, asserted).
 - Exactly **43 keys**, asserted at build time and again as column order immediately before
   `to_excel`, and re-asserted after reading the workbook back.
 - Single `add_row(**kw)` that appends to every key and raises `KeyError` on an unknown column.
-- Pure `requests` — no Selenium, no ChromeDriver, no `win32com`, no Windows paths.
+- `requests` first — no Selenium, no ChromeDriver, no `win32com`, no Windows paths.
+  (v3.1 adds a lazy Chrome fallback for the fetch; see below.)
 - Serial + backoff to survive the 429 limiter; retries with escalating cooldown.
 - Sectors and authorisation types **discovered every run**; no hard-coded enumeration.
 - Output lands in the regulator folder, not `tempfolder/`.
 - Loud reconciliation block + status histogram in the run log.
 - ID/Zip/Phone columns pinned to Excel text format, then **read back and asserted**
   (`InternalID_1` sample round-tripped as `'OC 198'`, not a float).
+
+### What v3.1 changes
+
+Transport only — no parsing, mapping or schema change.
+
+- `make_session()` / `get_json()` are replaced by a `Channel` that falls back from `requests`
+  to browser-side same-origin XHR on refusal, fixing the 2026-08-21 production `403` (see
+  "Cloudflare blocks the control server" above). `get_json(session, url, params)` is kept as a
+  thin shim so every existing call site reads unchanged.
+- A `403` now exits the `requests` retry loop immediately instead of burning 6 × 5 s first.
+- `HEADERS` swapped to a Windows Chrome UA plus `Accept` / `Accept-Language`. This alone does
+  **not** fix the 403 — measured as making no difference — but the control server is Windows.
+- The reconciliation block prints `transport used: requests|browser`.
+- Chrome is released via `channel.close()` as soon as the last endpoint is read.
+
+Re-run 2026-08-25 on the dev Mac: **12,605 rows, all 186 authorisation types fetched
+successfully, 0 failures**. Against the 2026-08-20 run (12,583 rows): +22 rows, 17 names
+added, 7 dropped — ordinary register churn over five days, not a scraper change.
+
+### What v3.2 changes
+
+Carried over from AL AFSA, which failed this way in production on 2026-08-26 — same
+Cloudflare root cause, same browser fallback, so the same exposure applies here.
+
+- **Chrome is now isolated**: `auto_port(True)` plus `--disable-extensions`, so
+  DrissionPage starts its own browser instead of attaching to whatever already listens on
+  `127.0.0.1:9222` with the operator's profile, extensions and any corporate
+  content-injection agent. That matters more here than anywhere else, because **every XHR
+  in this scraper fires from the anchored document** — a contaminated page context
+  contaminates all 186 fetches. Verified locally: the test browser came up on port `57430`.
+  Note `auto_port()` already allocates a throwaway user-data dir; calling
+  `set_user_data_path()` as well sets `_auto_port = False` after the address has been
+  blanked and Chromium dies on `not enough values to unpack`. If the isolated launch
+  fails, the code falls back to a shared Chrome and says so in the log.
+
+AL AFSA's other v3.2 fix — a loose substring guard accepting a page the strict assert then
+rejected — **does not apply here.** This scraper's acceptance test is `json.loads(body)`,
+which is the same test the caller relies on, so a body that would fail downstream can never
+be returned as a success in the first place.
+
+Re-run 2026-08-25 after the v3.2 change, forced-fallback test: 17 sectors over `requests`,
+17 identical sectors over the isolated browser.
 
 ## Judgment calls for the requester
 

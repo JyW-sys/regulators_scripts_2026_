@@ -3,7 +3,23 @@
 # MT MFSA - Malta Financial Services Authority
 # DECD-6834 : List 1 "License Holders"
 # Source app : https://fsr.mfsa.mt  (iframed by https://www.mfsa.mt/financial-services-register/)
-# Backend    : plain JSON endpoints (no browser, no driver needed)
+# Backend    : plain JSON endpoints
+#
+# TRANSPORT (v3.1) -- fsr.mfsa.mt sits behind Cloudflare.
+#   The JSON endpoints answer plain requests *when Cloudflare lets the caller
+#   through*.  It does not always: the 2026-08-21 production run died on
+#       RuntimeError: giving up on .../getParentLicenceTypes params=None : HTTP 403
+#   on the very first call, while the same endpoint returned 200 from the dev
+#   Mac.  Measured here: bare / Mac-UA / Windows-UA / full browser headers /
+#   full+XHR headers ALL returned 200, so the refusal keys on the client
+#   (egress IP + TLS fingerprint), not on the headers we send -- no amount of
+#   header tuning fixes it.
+#
+#   So: requests first, and once refused, every later call is issued as a
+#   same-origin XHR from inside a real Chrome sitting on fsr.mfsa.mt.  That is
+#   the pattern proven in production by HK IAHK v1.5, which hit the identical
+#   "works on the Mac, 403s on the control server" split.  DrissionPage is
+#   imported lazily so a box where requests already works never needs it.
 # =============================================================================
 import os
 import re
@@ -35,8 +51,10 @@ EP_SUBS    = BASE + '/LicenceTypes/getLicenceTypesByParentId'
 EP_HOLDERS = BASE + '/Licences/getLicenceHoldersByLicenceTypeId'
 
 HEADERS = {
-    'User-Agent': ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-                   'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'),
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'),
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
     'Referer': BASE + '/',
     'X-Requested-With': 'XMLHttpRequest',
 }
@@ -44,6 +62,25 @@ HEADERS = {
 # The app rate-limits hard (HTTP 429) above roughly 3 req/s. Stay serial + polite.
 REQ_DELAY = 0.4
 MAX_RETRY = 6
+
+# How long Chrome may spend clearing a Cloudflare interstitial before we give up.
+CLEARANCE_TIMEOUT = 120
+# Statuses worth asking again for; anything else is a real answer, not weather.
+RETRY_STATUSES = (0, -1, 403, 408, 429, 500, 502, 503, 504)
+BROWSER_ATTEMPTS = 4
+RETRY_BASE_DELAY = 3          # seconds, doubled each attempt: 3, 6, 12
+
+# Issued from inside the page, so it inherits the origin, its cookies and the
+# browser's own TLS fingerprint. Synchronous on purpose: run_js returns the
+# finished response rather than a promise we would have to poll.
+SYNC_XHR_JSON = """
+var xhr = new XMLHttpRequest();
+xhr.open('GET', arguments[0], false);
+xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+try { xhr.send(null); }
+catch (e) { return JSON.stringify({status: -1, body: '' + e}); }
+return JSON.stringify({status: xhr.status, body: xhr.responseText});
+"""
 
 # ---- ticket-level constants (hard-coded on purpose: never derive RegCode by
 # ---- splitting a dict key -- that is how sibling notebooks ended up emitting a
@@ -72,33 +109,208 @@ SCHEMA = list(sqldict.keys())
 assert len(SCHEMA) == 43, 'schema must be exactly 43 keys, got {}'.format(len(SCHEMA))
 
 #---- Begin_Function ----
-def make_session():
-    """A session that has visited the home page (the app sets an 'MFSA' cookie
-    and an antiforgery cookie; the JSON endpoints 400 without them)."""
-    s = requests.Session()
-    s.headers.update(HEADERS)
-    s.verify = False
-    s.get(BASE + '/', timeout=90)
-    return s
+def looks_like_challenge(text):
+    """True if this is Cloudflare's interstitial rather than the payload."""
+    head = (text or '')[:800].lower()
+    return ('just a moment' in head
+            or 'cf-browser-verification' in head
+            or 'challenge-platform' in head
+            or 'attention required' in head)
+
+
+def build_url(url, params):
+    """Absolute URL with the query baked in -- the browser XHR takes one string."""
+    if not params:
+        return url
+    try:
+        from urllib.parse import urlencode
+    except ImportError:                               # pragma: no cover (py2)
+        from urllib import urlencode
+    return '{}?{}'.format(url, urlencode(params))
+
+
+class Channel(object):
+    """Reads fsr.mfsa.mt over requests while allowed, through Chrome once refused.
+
+    The switch is sticky and one-way. With ~12.5k holders spread over hundreds
+    of authorisation types, re-testing requests on every call would cost one
+    refusal per call for the whole run.
+    """
+
+    def __init__(self):
+        self.mode = 'requests'
+        self.page = None
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
+        self.session.verify = False
+        # The app sets an 'MFSA' cookie plus an antiforgery cookie on the home
+        # page; the JSON endpoints answer 400 without them.
+        try:
+            self.session.get(BASE + '/', timeout=90)
+        except Exception:
+            pass                                       # the fallback still has a chance
+
+    # -- browser side ---------------------------------------------------------
+    def _browser(self):
+        """A visible Chrome parked on fsr.mfsa.mt, started on first need.
+
+        headless MUST stay off: Cloudflare challenges headless Chrome and it
+        never clears.
+        """
+        if self.page is not None:
+            return self.page
+        try:
+            from DrissionPage import ChromiumPage, ChromiumOptions
+        except ImportError:
+            raise RuntimeError(
+                'requests was refused by Cloudflare and DrissionPage is not '
+                'installed, so there is no way left to reach fsr.mfsa.mt.  '
+                'Install it on this box:  pip install DrissionPage')
+        def base_options():
+            options = ChromiumOptions()
+            options.headless(False)
+            options.set_argument('--disable-blink-features=AutomationControlled')
+            return options
+
+        # Start OUR OWN Chrome rather than attaching to whatever already listens
+        # on the default debug port (127.0.0.1:9222).  A shared Chrome brings the
+        # operator's profile and extensions with it, and every XHR here fires
+        # from that document -- AL AFSA hit exactly that on 2026-08-26.
+        #
+        # auto_port() allocates a free port AND a throwaway user-data dir itself.
+        # Do NOT also call set_user_data_path(): it flips _auto_port back to False
+        # after auto_port() has already blanked the address, and Chromium then
+        # dies on "not enough values to unpack" before the browser starts.
+        options = base_options()
+        try:
+            options.auto_port(True)
+            options.set_argument('--disable-extensions')
+            options.set_argument('--no-first-run')
+        except Exception:                                # noqa: BLE001
+            options = base_options()     # older DrissionPage: option absent
+        try:
+            self.page = ChromiumPage(options)
+        except Exception as exc:                         # noqa: BLE001
+            print('  [!] isolated Chrome failed to start ({}); retrying on the '
+                  'default port. If Cloudflare will not clear, close every other '
+                  'Chrome window first.'.format(type(exc).__name__))
+            self.page = ChromiumPage(base_options())
+        self._anchor()
+        return self.page
+
+    def _anchor(self):
+        """Park the browser on the app origin and wait out any challenge.
+
+        Every later XHR fires from this document, so it must be settled on
+        fsr.mfsa.mt before anything else runs.
+        """
+        self.page.get(BASE + '/')
+        deadline = time.time() + CLEARANCE_TIMEOUT
+        while time.time() < deadline:
+            try:
+                html = self.page.html
+            except Exception:
+                html = ''                              # mid-navigation
+            if html and not looks_like_challenge(html):
+                return
+            time.sleep(2)
+        raise RuntimeError(
+            'SKIPPED - Chrome could not clear Cloudflare on {} within {}s. If '
+            'this box shows an "I am not a robot" checkbox it needs ticking by '
+            'hand once, or CLEARANCE_TIMEOUT raising.'.format(BASE, CLEARANCE_TIMEOUT))
+
+    def _run(self, url):
+        """One browser-side XHR, re-anchoring once if the page context is lost."""
+        page = self._browser()
+        try:
+            return json.loads(page.run_js(SYNC_XHR_JSON, url, timeout=180))
+        except Exception as err:
+            print('   [!] browser context lost on {} ({}); re-anchoring and '
+                  'retrying once'.format(url, type(err).__name__))
+            self._anchor()
+            return json.loads(page.run_js(SYNC_XHR_JSON, url, timeout=180))
+
+    def _browser_json(self, url):
+        """Fetch url in the browser, retried through transient refusals."""
+        delay = RETRY_BASE_DELAY
+        detail = ''
+        for attempt in range(1, BROWSER_ATTEMPTS + 1):
+            payload = self._run(url)
+            status = payload.get('status')
+            body = payload.get('body') or ''
+            if status == 200:
+                if looks_like_challenge(body):
+                    detail = 'HTTP 200 carrying a Cloudflare challenge page'
+                else:
+                    try:
+                        return json.loads(body)
+                    except ValueError:
+                        # soft-404 guard: the app answers errors as HTML
+                        detail = 'HTTP 200 but body is not JSON -- first 120 bytes: {!r}'.format(body[:120])
+            else:
+                detail = 'HTTP {}'.format(status)
+                if looks_like_challenge(body):
+                    detail += ' carrying a Cloudflare challenge page'
+                elif body:
+                    detail += ' -- first 120 bytes: {!r}'.format(body[:120])
+
+            if status not in RETRY_STATUSES or attempt == BROWSER_ATTEMPTS:
+                break
+            print('   attempt {} of {} got {}; retrying in {}s'.format(
+                attempt, BROWSER_ATTEMPTS, detail, delay))
+            time.sleep(delay)
+            delay *= 2
+            if attempt >= 2:
+                self._anchor()      # the refusal may be a re-armed challenge
+        raise RuntimeError('the browser itself got {} for {}'.format(detail, url))
+
+    def _fall_back(self, reason):
+        self.mode = 'browser'
+        print('  [!] requests was refused ({}). Switching to browser-side '
+              'fetching for the rest of the run.'.format(reason))
+
+    # -- public ---------------------------------------------------------------
+    def json(self, url, params=None):
+        """Parsed JSON from whichever transport is currently working."""
+        full = build_url(url, params)
+        if self.mode == 'requests':
+            last = None
+            for attempt in range(MAX_RETRY):
+                try:
+                    r = self.session.get(url, params=params, timeout=90)
+                    if r.status_code == 200:
+                        ctype = r.headers.get('content-type', '')
+                        if 'json' not in ctype.lower():
+                            raise ValueError('non-JSON content-type {!r} from {}'.format(ctype, r.url))
+                        return r.json()
+                    last = 'HTTP {}'.format(r.status_code)
+                    # 403 is Cloudflare refusing this client outright. Retrying
+                    # requests cannot help -- go to the browser now rather than
+                    # burning MAX_RETRY * 5s first.
+                    if r.status_code == 403:
+                        break
+                except Exception as exc:              # noqa: BLE001
+                    last = repr(exc)
+                if attempt < MAX_RETRY - 1:
+                    time.sleep(5 * (attempt + 1))     # 429 needs real cooldown
+            self._fall_back(last)
+        return self._browser_json(full)
+
+    def close(self):
+        if self.page is not None:
+            try:
+                self.page.quit()
+            except Exception:
+                pass
+            self.page = None
+
+
+channel = Channel()
 
 
 def get_json(session, url, params=None):
-    """GET with backoff. Returns parsed JSON, or raises after MAX_RETRY."""
-    last = None
-    for attempt in range(MAX_RETRY):
-        try:
-            r = session.get(url, params=params, timeout=90)
-            if r.status_code == 200:
-                # soft-404 guard: the app answers errors as HTML, not JSON
-                ctype = r.headers.get('content-type', '')
-                if 'json' not in ctype.lower():
-                    raise ValueError('non-JSON content-type {!r} from {}'.format(ctype, r.url))
-                return r.json()
-            last = 'HTTP {}'.format(r.status_code)
-        except Exception as exc:                      # noqa: BLE001
-            last = repr(exc)
-        time.sleep(5 * (attempt + 1))                 # 429 needs real cooldown
-    raise RuntimeError('giving up on {} params={} : {}'.format(url, params, last))
+    """Kept for call-site compatibility; `session` is now owned by the channel."""
+    return channel.json(url, params)
 
 
 def clean(value):
@@ -135,7 +347,7 @@ def licence_label(lic):
     return name
 
 #---- Begin_MainLoop ----
-session = make_session()
+session = channel.session      # kept so existing call sites read unchanged
 
 # --- 1. discover the Sector list (never hard-code an enumeration) -------------
 parents = get_json(session, EP_PARENTS)
@@ -216,8 +428,11 @@ for idx, (sector, ltid, ltname) in enumerate(jobs, 1):
     if idx % 25 == 0:
         print('   ... {}/{} authorisation types done'.format(idx, len(jobs)))
 
+channel.close()   # release Chrome as soon as the last endpoint is read
+
 # --- 4. reconciliation -------------------------------------------------------
 print('\n================ RECONCILIATION ================')
+print('  transport used: {}'.format(channel.mode))
 for sector in sorted(per_sector):
     print('  {:<70} {:>6}'.format(sector[:70], per_sector[sector]))
 print('  {:<70} {:>6}'.format('TOTAL licence rows built', sum(per_sector.values())))

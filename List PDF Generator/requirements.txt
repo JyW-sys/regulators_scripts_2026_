@@ -1,5 +1,0 @@
-# List PDF Generator dependencies
-# Install with:  pip install -r requirements.txt
-pandas>=1.3
-openpyxl>=3.0     # engine pandas uses to read .xlsx
-reportlab>=3.6    # PDF generation
